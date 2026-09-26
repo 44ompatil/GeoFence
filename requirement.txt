@@ -1,0 +1,7 @@
+# GeoFence project dependencies
+# Optional Python utilities for Firebase admin scripts and backend integrations.
+
+firebase-admin==6.6.0
+google-cloud-firestore>=2.16.0
+python-dotenv==1.0.1
+requests==2.32.3
