@@ -1,6 +1,6 @@
 | Component           |   Qty | Purpose               |
 | ------------------- | ----: | --------------------- |
-| ESP32 DevKit        |     1 | Main controller       |
+| ESP32 DevKit V1      |     1 | Main controller       |
 | NEO-6M GPS          |     1 | Location              |
 | MPU6050             |     1 | Movement/acceleration |
 | Buzzer              |     1 | Warning               |
