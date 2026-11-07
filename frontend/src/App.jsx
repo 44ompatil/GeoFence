@@ -1,41 +1,41 @@
-import { useState, useEffect, useRef } from 'react';
-import { Loader2 } from 'lucide-react';
-import AppLayout from './components/layout/AppLayout';
-import DashboardScreen from './screens/DashboardScreen';
-import SafeZonesScreen from './screens/SafeZonesScreen';
-import AlertsScreen from './screens/AlertsScreen';
-import SettingsScreen from './screens/SettingsScreen';
-import AuthScreen from './screens/AuthScreen';
-import { AuthProvider, useAuth } from './context/AuthContext';
+import { useState, useEffect, useRef } from "react";
+import { Loader2 } from "lucide-react";
+import AppLayout from "./components/layout/AppLayout";
+import DashboardScreen from "./screens/DashboardScreen";
+import SafeZonesScreen from "./screens/SafeZonesScreen";
+import AlertsScreen from "./screens/AlertsScreen";
+import SettingsScreen from "./screens/SettingsScreen";
+import AuthScreen from "./screens/AuthScreen";
+import { AuthProvider, useAuth } from "./context/AuthContext";
 import {
   subscribePets,
   createPet,
   updatePet,
   deletePet,
-} from './services/firestore/pets';
+} from "./services/firestore/pets";
 import {
   subscribeSafeZones,
   createSafeZone,
   updateSafeZone,
   deleteSafeZone,
-} from './services/firestore/safeZones';
+} from "./services/firestore/safeZones";
 import {
   subscribeAlerts,
   markAlertResolved,
-} from './services/firestore/alerts';
+} from "./services/firestore/alerts";
 import {
   DEFAULT_SETTINGS,
   subscribeSettings,
   ensureUserSettingsInitialized,
-} from './services/firestore/settings';
+} from "./services/firestore/settings";
 import {
   evaluatePetsAndGenerateAlerts,
   resetAlertEngineState,
-} from './services/alertEngine';
+} from "./services/alertEngine";
 
 function AuthenticatedApp() {
   const { currentUser, loading: authLoading } = useAuth();
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [activeTab, setActiveTab] = useState("dashboard");
 
   // Shared Firestore-backed state (starts completely empty for every user)
   const [pets, setPets] = useState([]);
@@ -80,7 +80,7 @@ function AuthenticatedApp() {
         email: currentUser.email,
         photoURL: currentUser.photoURL,
       }).catch((err) => {
-        console.error('[Firestore] User settings initialization error:', err);
+        console.error("[Firestore] User settings initialization error:", err);
       });
     }
 
@@ -99,9 +99,9 @@ function AuthenticatedApp() {
         });
       },
       (error) => {
-        console.error('Failed to subscribe to pets:', error);
+        console.error("Failed to subscribe to pets:", error);
         setPetsLoading(false);
-      }
+      },
     );
 
     // Real-time listener for users/{uid}/safeZones
@@ -112,9 +112,9 @@ function AuthenticatedApp() {
         setZonesLoading(false);
       },
       (error) => {
-        console.error('Failed to subscribe to safe zones:', error);
+        console.error("Failed to subscribe to safe zones:", error);
         setZonesLoading(false);
-      }
+      },
     );
 
     // Real-time listener for users/{uid}/alerts
@@ -125,9 +125,9 @@ function AuthenticatedApp() {
         setAlertsLoading(false);
       },
       (error) => {
-        console.error('Failed to subscribe to alerts:', error);
+        console.error("Failed to subscribe to alerts:", error);
         setAlertsLoading(false);
-      }
+      },
     );
 
     // Real-time listener for users/{uid}/settings/preferences
@@ -137,8 +137,8 @@ function AuthenticatedApp() {
         setSettings(loadedSettings);
       },
       (error) => {
-        console.error('Failed to subscribe to settings:', error);
-      }
+        console.error("Failed to subscribe to settings:", error);
+      },
     );
 
     return () => {
@@ -159,7 +159,7 @@ function AuthenticatedApp() {
       safeZones,
       settings,
     }).catch((err) => {
-      console.error('[AlertEngine] Evaluation error:', err);
+      console.error("[AlertEngine] Evaluation error:", err);
     });
   }, [currentUser?.uid, pets, safeZones, settings, petsLoading, zonesLoading]);
 
@@ -195,12 +195,20 @@ function AuthenticatedApp() {
     return <AuthScreen initialMode="login" />;
   }
 
-  const selectedPet = pets.find((p) => p.id === selectedPetId) || pets[0] || null;
+  const selectedPet =
+    pets.find((p) => p.id === selectedPetId) || pets[0] || null;
   const unresolvedAlertsCount = alerts.filter((a) => !a.resolved).length;
 
   // --- Firestore Pet Operations ---
   const handleAddPet = async (petData) => {
-    if (!currentUser?.uid) return { success: false, error: 'User unauthenticated' };
+    if (!currentUser?.uid)
+      return { success: false, error: "User unauthenticated" };
+    if (safeZones.length === 0) {
+      return {
+        success: false,
+        error: "Create a safe zone before adding a pet.",
+      };
+    }
     const result = await createPet(currentUser.uid, petData);
     if (result.success && result.pet) {
       if (!selectedPetId) {
@@ -211,12 +219,14 @@ function AuthenticatedApp() {
   };
 
   const handleUpdatePet = async (petId, petData) => {
-    if (!currentUser?.uid) return { success: false, error: 'User unauthenticated' };
+    if (!currentUser?.uid)
+      return { success: false, error: "User unauthenticated" };
     return await updatePet(currentUser.uid, petId, petData);
   };
 
   const handleDeletePet = async (petToDelete) => {
-    if (!currentUser?.uid) return { success: false, error: 'User unauthenticated' };
+    if (!currentUser?.uid)
+      return { success: false, error: "User unauthenticated" };
     const result = await deletePet(currentUser.uid, petToDelete.id);
     if (result.success) {
       if (selectedPetId === petToDelete.id) {
@@ -229,28 +239,32 @@ function AuthenticatedApp() {
 
   // --- Firestore Safe Zone Operations ---
   const handleAddSafeZone = async (zoneData) => {
-    if (!currentUser?.uid) return { success: false, error: 'User unauthenticated' };
+    if (!currentUser?.uid)
+      return { success: false, error: "User unauthenticated" };
     return await createSafeZone(currentUser.uid, zoneData);
   };
 
   const handleUpdateSafeZone = async (zoneId, zoneData) => {
-    if (!currentUser?.uid) return { success: false, error: 'User unauthenticated' };
+    if (!currentUser?.uid)
+      return { success: false, error: "User unauthenticated" };
     return await updateSafeZone(currentUser.uid, zoneId, zoneData);
   };
 
   const handleDeleteSafeZone = async (zoneToDelete) => {
-    if (!currentUser?.uid) return { success: false, error: 'User unauthenticated' };
+    if (!currentUser?.uid)
+      return { success: false, error: "User unauthenticated" };
     return await deleteSafeZone(currentUser.uid, zoneToDelete.id);
   };
 
   // --- Firestore Alert Operations ---
   const handleResolveAlert = async (alertId) => {
-    if (!currentUser?.uid) return { success: false, error: 'User unauthenticated' };
+    if (!currentUser?.uid)
+      return { success: false, error: "User unauthenticated" };
     return await markAlertResolved(currentUser.uid, alertId);
   };
 
   const handleNavigateToAddSafeZone = () => {
-    setActiveTab('zones');
+    setActiveTab("zones");
   };
 
   return (
@@ -260,7 +274,7 @@ function AuthenticatedApp() {
       unresolvedAlertsCount={unresolvedAlertsCount}
     >
       <div key={activeTab} className="animate-page-fade">
-        {activeTab === 'dashboard' && (
+        {activeTab === "dashboard" && (
           <DashboardScreen
             pets={pets}
             setPets={setPets}
@@ -277,7 +291,7 @@ function AuthenticatedApp() {
           />
         )}
 
-        {activeTab === 'zones' && (
+        {activeTab === "zones" && (
           <SafeZonesScreen
             safeZones={safeZones}
             setSafeZones={setSafeZones}
@@ -291,18 +305,12 @@ function AuthenticatedApp() {
           />
         )}
 
-        {activeTab === 'alerts' && (
-          <AlertsScreen
-            alerts={alerts}
-            onResolveAlert={handleResolveAlert}
-          />
+        {activeTab === "alerts" && (
+          <AlertsScreen alerts={alerts} onResolveAlert={handleResolveAlert} />
         )}
 
-        {activeTab === 'settings' && (
-          <SettingsScreen
-            pets={pets}
-            onUpdatePet={handleUpdatePet}
-          />
+        {activeTab === "settings" && (
+          <SettingsScreen pets={pets} onUpdatePet={handleUpdatePet} />
         )}
       </div>
     </AppLayout>

@@ -1,9 +1,45 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    
+    // Helper function: check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function: check if authenticated user is the document owner
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // User profile document
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+      
+      // User's private pets subcollection
+      match /pets/{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      // User's private safe zones subcollection
+      match /safeZones/{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      // User's private settings subcollection
+      match /settings/{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      // User's private alerts subcollection
+      match /alerts/{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    // Default deny all other paths
     match /{document=**} {
-      allow read: if true;
-      allow write: if false;
+      allow read, write: if false;
     }
   }
 }
