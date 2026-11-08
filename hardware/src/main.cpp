@@ -372,8 +372,132 @@ void updateAlertOutputs() {
 }
 
 // ----------------------------------------------------------------------------
-// WIFI AND HTTPS TELEMETRY
+// FIREBASE AUTH — EMAIL/PASSWORD SIGN-IN (no Cloud Functions, no Python needed)
 // ----------------------------------------------------------------------------
+// The ESP32 signs in directly with the owner's Firebase Auth credentials.
+// At boot: email+password → ID token + refresh token via identitytoolkit REST.
+// Every 55 minutes: the ID token is auto-refreshed via securetoken REST.
+// All Firestore writes use the live ID token.  Works on Spark (free) plan.
+// ----------------------------------------------------------------------------
+
+static String firebaseIdToken    = "";
+static String firebaseRefreshTok = "";
+static unsigned long lastTokenRefreshMs = 0;
+static bool tokenBootstrapped = false;
+
+// Sign in with email + password.
+// POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=API_KEY
+bool signInWithEmailPassword() {
+    if (strlen(GEOFENCE_FIREBASE_API_KEY) == 0 || strlen(GEOFENCE_AUTH_EMAIL) == 0) {
+        Serial.println("[Auth] Set GEOFENCE_FIREBASE_API_KEY and GEOFENCE_AUTH_EMAIL in Secrets.h.");
+        return false;
+    }
+
+    WiFiClientSecure secureClient;
+    secureClient.setCACert(FIREBASE_ROOT_CA);
+
+    HTTPClient http;
+    http.setTimeout(8000);
+    String url = String("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=")
+                 + GEOFENCE_FIREBASE_API_KEY;
+    if (!http.begin(secureClient, url)) {
+        Serial.println("[Auth] Failed to begin sign-in request.");
+        return false;
+    }
+
+    http.addHeader("Content-Type", "application/json");
+    JsonDocument req;
+    req["email"]             = GEOFENCE_AUTH_EMAIL;
+    req["password"]          = GEOFENCE_AUTH_PASSWORD;
+    req["returnSecureToken"] = true;
+    String body;
+    serializeJson(req, body);
+
+    int code = http.POST(body);
+    String resp = http.getString();
+    http.end();
+
+    if (code != 200) {
+        Serial.printf("[Auth] Sign-in failed (%d): %s\n", code, resp.c_str());
+        return false;
+    }
+
+    JsonDocument respDoc;
+    if (deserializeJson(respDoc, resp) != DeserializationError::Ok) {
+        Serial.println("[Auth] Failed to parse sign-in response.");
+        return false;
+    }
+
+    firebaseIdToken    = respDoc["idToken"].as<String>();
+    firebaseRefreshTok = respDoc["refreshToken"].as<String>();
+    lastTokenRefreshMs = millis();
+    tokenBootstrapped  = true;
+    Serial.println("[Auth] Signed in to Firebase successfully.");
+    return true;
+}
+
+// Refresh an expired ID token using the stored refresh token.
+// POST https://securetoken.googleapis.com/v1/token?key=API_KEY
+bool refreshIdToken() {
+    if (firebaseRefreshTok.isEmpty()) return false;
+
+    WiFiClientSecure secureClient;
+    secureClient.setCACert(FIREBASE_ROOT_CA);
+
+    HTTPClient http;
+    http.setTimeout(8000);
+    String url = String("https://securetoken.googleapis.com/v1/token?key=")
+                 + GEOFENCE_FIREBASE_API_KEY;
+    if (!http.begin(secureClient, url)) {
+        Serial.println("[Auth] Failed to begin token refresh request.");
+        return false;
+    }
+
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    String body = "grant_type=refresh_token&refresh_token=" + firebaseRefreshTok;
+
+    int code = http.POST(body);
+    String resp = http.getString();
+    http.end();
+
+    if (code != 200) {
+        Serial.printf("[Auth] Token refresh failed (%d): %s\n", code, resp.c_str());
+        return false;
+    }
+
+    JsonDocument respDoc;
+    if (deserializeJson(respDoc, resp) != DeserializationError::Ok) {
+        Serial.println("[Auth] Failed to parse token refresh response.");
+        return false;
+    }
+
+    firebaseIdToken    = respDoc["id_token"].as<String>();
+    firebaseRefreshTok = respDoc["refresh_token"].as<String>();
+    lastTokenRefreshMs = millis();
+    Serial.println("[Auth] Firebase ID token refreshed.");
+    return true;
+}
+
+// Ensure we have a valid token.  Call before every telemetry write.
+bool ensureValidToken() {
+    if (!tokenBootstrapped) {
+        return signInWithEmailPassword();
+    }
+    // Refresh 5 minutes before the 60-minute expiry
+    if (millis() - lastTokenRefreshMs >= 55UL * 60UL * 1000UL) {
+        return refreshIdToken();
+    }
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// WIFI AND HTTPS TELEMETRY  (Firestore REST — no Cloud Functions required)
+// ----------------------------------------------------------------------------
+// Telemetry is PATCH-ed directly to the pet document via the Firestore REST
+// API.  The URL is built from GEOFENCE_PROJECT_ID, GEOFENCE_OWNER_UID, and
+// GEOFENCE_PET_ID defined in Secrets.h.
+// ----------------------------------------------------------------------------
+
 void startWifi() {
     if (strlen(GEOFENCE_WIFI_SSID) == 0 || strlen(GEOFENCE_WIFI_PASSWORD) == 0) {
         if (!wifiConfigWarningPrinted) {
@@ -402,28 +526,47 @@ void maintainWifi() {
     }
 }
 
-String buildTelemetryPayload() {
+// Build a Firestore REST PATCH body from the current telemetry state.
+// Only the fields that the firmware owns are sent; all other pet fields
+// (name, breed, photo, etc.) are left untouched by the PATCH.
+// See: https://firebase.google.com/docs/firestore/reference/rest/v1/projects.databases.documents/patch
+String buildFirestorePatchBody() {
     JsonDocument doc;
+    JsonObject fields = doc["fields"].to<JsonObject>();
 
-    doc["deviceId"] = DEVICE_ID;
-    doc["status"] = GeoUtils::riskStateToString(currentRisk);
-    doc["riskLevel"] = GeoUtils::riskLevelToFrontend(currentRisk);
-    doc["heading"] = currentHeading;
+    // Helper lambdas for Firestore typed value objects
+    auto strVal = [&](JsonObject parent, const char* key, const String& val) {
+        parent[key]["stringValue"] = val;
+    };
+    auto intVal = [&](JsonObject parent, const char* key, int val) {
+        parent[key]["integerValue"] = val;
+    };
+    auto dblVal = [&](JsonObject parent, const char* key, double val) {
+        parent[key]["doubleValue"] = val;
+    };
+    auto boolVal = [&](JsonObject parent, const char* key, bool val) {
+        parent[key]["booleanValue"] = val;
+    };
+
+    strVal(fields, "deviceId", String(DEVICE_ID));
+    strVal(fields, "status",   String(GeoUtils::riskStateToString(currentRisk)));
+    strVal(fields, "riskLevel", String(GeoUtils::riskLevelToFrontend(currentRisk)));
+    strVal(fields, "heading",  currentHeading);
 
     char speedBuf[16];
     snprintf(speedBuf, sizeof(speedBuf), "%0.1f km/h", currentSpeedKmH);
-    doc["speed"] = speedBuf;
+    strVal(fields, "speed", String(speedBuf));
 
-    doc["collarBattery"] = batteryPercent;
-    doc["hasFix"] = hasGpsFix;
+    intVal(fields, "collarBattery", batteryPercent);
+    boolVal(fields, "hasFix", hasGpsFix);
 
     if (hasGpsFix) {
-        doc["lat"] = currentLat;
-        doc["lng"] = currentLng;
-        doc["distanceToBoundary"] = round(distanceToBoundary * 10.0) / 10.0;
-        doc["motionLevel"] = round(currentMpuData.motionAcceleration * 100.0) / 100.0;
-        doc["activity"] = currentMpuData.activity;
-        doc["satellites"] = satellitesCount;
+        dblVal(fields, "lat", currentLat);
+        dblVal(fields, "lng", currentLng);
+        dblVal(fields, "distanceToBoundary", round(distanceToBoundary * 10.0) / 10.0);
+        dblVal(fields, "motionLevel", round(currentMpuData.motionAcceleration * 100.0) / 100.0);
+        strVal(fields, "activity", String(currentMpuData.activity));
+        intVal(fields, "satellites", satellitesCount);
     }
 
     String payload;
@@ -431,12 +574,43 @@ String buildTelemetryPayload() {
     return payload;
 }
 
-void transmitTelemetry(const String& payload) {
-    if (!wifiStarted || WiFi.status() != WL_CONNECTED) {
-        return;
+// Build a simple JSON payload for the Serial monitor (unchanged format)
+String buildTelemetryPayload() {
+    JsonDocument doc;
+    doc["deviceId"] = DEVICE_ID;
+    doc["status"]   = GeoUtils::riskStateToString(currentRisk);
+    doc["riskLevel"]= GeoUtils::riskLevelToFrontend(currentRisk);
+    doc["heading"]  = currentHeading;
+
+    char speedBuf[16];
+    snprintf(speedBuf, sizeof(speedBuf), "%0.1f km/h", currentSpeedKmH);
+    doc["speed"] = speedBuf;
+
+    doc["collarBattery"] = batteryPercent;
+    doc["hasFix"]        = hasGpsFix;
+
+    if (hasGpsFix) {
+        doc["lat"]               = currentLat;
+        doc["lng"]               = currentLng;
+        doc["distanceToBoundary"]= round(distanceToBoundary * 10.0) / 10.0;
+        doc["motionLevel"]       = round(currentMpuData.motionAcceleration * 100.0) / 100.0;
+        doc["activity"]          = currentMpuData.activity;
+        doc["satellites"]        = satellitesCount;
     }
-    if (strlen(GEOFENCE_INGEST_URL) == 0 || strlen(GEOFENCE_DEVICE_TOKEN) == 0) {
-        Serial.println("[WiFi] Configure ingest URL and device token in include/Secrets.h.");
+
+    String payload;
+    serializeJson(doc, payload);
+    return payload;
+}
+
+// PATCH telemetry fields directly into the Firestore pet document.
+// Uses the Firestore REST API with the Firebase ID token for auth.
+void transmitTelemetry(const String& serialPayload) {
+    if (!wifiStarted || WiFi.status() != WL_CONNECTED) return;
+
+    if (strlen(GEOFENCE_FIREBASE_API_KEY) == 0 || strlen(GEOFENCE_AUTH_EMAIL) == 0
+        || strlen(GEOFENCE_OWNER_UID) == 0 || strlen(GEOFENCE_PET_ID) == 0) {
+        Serial.println("[HTTPS] Configure Firebase credentials in include/Secrets.h.");
         return;
     }
 
@@ -450,25 +624,69 @@ void transmitTelemetry(const String& payload) {
         return;
     }
 
+    // Ensure we have a valid Firebase ID token
+    if (!ensureValidToken()) {
+        Serial.println("[Auth] No valid Firebase token; skipping telemetry upload.");
+        return;
+    }
+
+    // Build Firestore PATCH URL from Secrets.h components.
+    // Append updateMask.fieldPaths for every field we write so we don't
+    // accidentally erase other pet fields (name, photo, breed, etc.).
+    String patchUrl = String("https://firestore.googleapis.com/v1/projects/")
+        + GEOFENCE_PROJECT_ID
+        + "/databases/(default)/documents/users/"
+        + GEOFENCE_OWNER_UID
+        + "/pets/"
+        + GEOFENCE_PET_ID
+        + "?updateMask.fieldPaths=deviceId"
+        + "&updateMask.fieldPaths=status"
+        + "&updateMask.fieldPaths=riskLevel"
+        + "&updateMask.fieldPaths=heading"
+        + "&updateMask.fieldPaths=speed"
+        + "&updateMask.fieldPaths=collarBattery"
+        + "&updateMask.fieldPaths=hasFix";
+    if (hasGpsFix) {
+        patchUrl += "&updateMask.fieldPaths=lat"
+                    "&updateMask.fieldPaths=lng"
+                    "&updateMask.fieldPaths=distanceToBoundary"
+                    "&updateMask.fieldPaths=motionLevel"
+                    "&updateMask.fieldPaths=activity"
+                    "&updateMask.fieldPaths=satellites";
+    }
+
     WiFiClientSecure secureClient;
     secureClient.setCACert(FIREBASE_ROOT_CA);
 
     HTTPClient request;
-    request.setTimeout(5000);
-    if (!request.begin(secureClient, GEOFENCE_INGEST_URL)) {
-        Serial.println("[HTTPS] Failed to initialize request.");
+    request.setTimeout(8000);
+    if (!request.begin(secureClient, patchUrl)) {
+        Serial.println("[HTTPS] Failed to initialize Firestore PATCH request.");
         return;
     }
 
     request.addHeader("Content-Type", "application/json");
-    request.addHeader("Authorization", String("Bearer ") + GEOFENCE_DEVICE_TOKEN);
-    int responseCode = request.POST(payload);
+    request.addHeader("Authorization", "Bearer " + firebaseIdToken);
+    request.addHeader("X-HTTP-Method-Override", "PATCH");   // some TLS stacks need this
+
+    String firestoreBody = buildFirestorePatchBody();
+    // Use PATCH via sendRequest since HTTPClient::PATCH is not always available
+    int responseCode = request.sendRequest("PATCH", firestoreBody);
+
     if (responseCode >= 200 && responseCode < 300) {
-        Serial.printf("[HTTPS] Telemetry accepted (%d).\n", responseCode);
+        Serial.printf("[HTTPS] Firestore telemetry accepted (%d).\n", responseCode);
     } else {
-        Serial.printf("[HTTPS] Telemetry failed (%d): %s\n",
+        Serial.printf("[HTTPS] Firestore telemetry failed (%d): %s\n",
             responseCode,
-            responseCode > 0 ? request.getString().c_str() : request.errorToString(responseCode).c_str());
+            responseCode > 0 ? request.getString().c_str()
+                              : request.errorToString(responseCode).c_str());
+        // If 401/403, force token re-bootstrap on next cycle
+        if (responseCode == 401 || responseCode == 403) {
+            tokenBootstrapped = false;
+            firebaseIdToken    = "";
+            firebaseRefreshTok = "";
+            Serial.println("[Auth] Token invalidated — will re-authenticate on next cycle.");
+        }
     }
     request.end();
 }
@@ -549,9 +767,11 @@ void loop() {
     // 7. Output Telemetry at configured rate (2 seconds)
     if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
         lastTelemetryMs = now;
-        String payload = buildTelemetryPayload();
-        Serial.println(payload);
+        // Print compact JSON to Serial monitor (unchanged format)
+        String serialPayload = buildTelemetryPayload();
+        Serial.println(serialPayload);
         maintainWifi();
-        transmitTelemetry(payload);
+        // Upload to Firestore via REST API (no Cloud Functions required)
+        transmitTelemetry(serialPayload);
     }
 }

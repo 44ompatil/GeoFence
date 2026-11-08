@@ -1,9 +1,67 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Helper function: check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper function: check if authenticated user is the document owner
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // -------------------------------------------------------------------------
+    // DEVICE REGISTRY — read by provision_device.py (admin SDK, server-side)
+    // The devices collection holds tokenHash + uid + petId for each ESP32.
+    // No client or device has direct read/write access here (admin SDK bypasses
+    // these rules). We block all client-side access for security.
+    // -------------------------------------------------------------------------
+    match /devices/{deviceId} {
+      allow read, write: if false;
+    }
+
+    // User profile document
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      // User's private pets subcollection
+      match /pets/{petId} {
+        allow read, write: if isOwner(userId);
+
+        // -----------------------------------------------------------------------
+        // TELEMETRY SUBCOLLECTION — ESP32 writes live telemetry here via the
+        // Firestore REST API using a Firebase custom token (issued by
+        // provision_device.py).  The firmware authenticates as the owning user
+        // so isOwner(userId) already covers this path; the extra rule below
+        // makes the intent explicit and also allows the device to write to the
+        // parent pet document to update status fields.
+        // -----------------------------------------------------------------------
+        match /telemetry/{document=**} {
+          allow read, write: if isOwner(userId);
+        }
+      }
+
+      // User's private safe zones subcollection
+      match /safeZones/{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // User's private settings subcollection
+      match /settings/{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // User's private alerts subcollection
+      match /alerts/{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    // Default deny all other paths
     match /{document=**} {
-      allow read: if true;
-      allow write: if false;
+      allow read, write: if false;
     }
   }
 }
