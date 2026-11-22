@@ -28,6 +28,10 @@ function sanitizePetData(data) {
  */
 function normalizePetDoc(docSnap) {
   const data = docSnap.data();
+  const validLat = typeof data.lat === 'number' && !isNaN(data.lat) ? data.lat : null;
+  const validLng = typeof data.lng === 'number' && !isNaN(data.lng) ? data.lng : null;
+  const hasCoordinates = validLat !== null && validLng !== null;
+
   return {
     id: docSnap.id,
     name: data.name || 'Unnamed Pet',
@@ -46,8 +50,13 @@ function normalizePetDoc(docSnap) {
     speed: data.speed || '0.0 km/h',
     zone: data.zone || 'Home Zone',
     color: data.color || '#B8865B',
-    lat: typeof data.lat === 'number' ? data.lat : (data.mapCoords?.lat || 18.6448),
-    lng: typeof data.lng === 'number' ? data.lng : (data.mapCoords?.lng || 73.7552),
+    lat: validLat,
+    lng: validLng,
+    hasFix: typeof data.hasFix === 'boolean' ? data.hasFix : hasCoordinates,
+    satellites: data.satellites ?? null,
+    distanceToBoundary: data.distanceToBoundary ?? null,
+    motionLevel: data.motionLevel ?? null,
+    activity: data.activity || null,
     mapCoords: data.mapCoords || { x: 39.8, y: 40.5 },
     collarBattery: data.collarBattery !== undefined ? data.collarBattery : 90,
     createdAt: data.createdAt || null,

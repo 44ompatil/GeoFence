@@ -22,7 +22,9 @@ import {
 import {
   subscribeAlerts,
   markAlertResolved,
+  clearAllAlerts,
 } from "./services/firestore/alerts";
+import AlertToastContainer from "./components/common/AlertToastContainer";
 import {
   DEFAULT_SETTINGS,
   subscribeSettings,
@@ -49,8 +51,29 @@ function AuthenticatedApp() {
 
   const [selectedPetId, setSelectedPetId] = useState(null);
 
+  // In-app popup/toast notifications for genuinely new alerts
+  const [notificationAlerts, setNotificationAlerts] = useState([]);
+  const seenAlertIdsRef = useRef(new Set());
+  const initialAlertsLoadedRef = useRef(false);
+
   // Prevent multiple initializations per user session
   const initializedUserRef = useRef(null);
+
+  // Helper to trigger popup/toast for genuinely new alert
+  const triggerAlertToast = (newAlert) => {
+    if (!newAlert || !newAlert.id) return;
+    if (seenAlertIdsRef.current.has(newAlert.id)) return;
+    seenAlertIdsRef.current.add(newAlert.id);
+    setNotificationAlerts((prev) => [newAlert, ...prev]);
+  };
+
+  const handleDismissToast = (alertId) => {
+    setNotificationAlerts((prev) => prev.filter((a) => a.id !== alertId));
+  };
+
+  const handleToastClick = () => {
+    setActiveTab("alerts");
+  };
 
   // 1. Subscribe to authenticated user's private Firestore subcollections & ensure defaults
   useEffect(() => {
@@ -58,6 +81,9 @@ function AuthenticatedApp() {
       setPets([]);
       setSafeZones([]);
       setAlerts([]);
+      setNotificationAlerts([]);
+      seenAlertIdsRef.current = new Set();
+      initialAlertsLoadedRef.current = false;
       setSettings(DEFAULT_SETTINGS);
       setSelectedPetId(null);
       setPetsLoading(false);
@@ -123,6 +149,21 @@ function AuthenticatedApp() {
       (loadedAlerts) => {
         setAlerts(loadedAlerts);
         setAlertsLoading(false);
+
+        if (!initialAlertsLoadedRef.current) {
+          // On first load/reload, mark all existing alerts as seen so we don't show old popups
+          loadedAlerts.forEach((a) => {
+            if (a.id) seenAlertIdsRef.current.add(a.id);
+          });
+          initialAlertsLoadedRef.current = true;
+        } else {
+          // When subsequent updates arrive, only show popups for genuinely new, unresolved alerts
+          loadedAlerts.forEach((a) => {
+            if (!a.resolved && a.id && !seenAlertIdsRef.current.has(a.id)) {
+              triggerAlertToast(a);
+            }
+          });
+        }
       },
       (error) => {
         console.error("Failed to subscribe to alerts:", error);
@@ -158,10 +199,20 @@ function AuthenticatedApp() {
       pets,
       safeZones,
       settings,
+      alerts,
+      onNewAlert: triggerAlertToast,
     }).catch((err) => {
       console.error("[AlertEngine] Evaluation error:", err);
     });
-  }, [currentUser?.uid, pets, safeZones, settings, petsLoading, zonesLoading]);
+  }, [
+    currentUser?.uid,
+    pets,
+    safeZones,
+    settings,
+    alerts,
+    petsLoading,
+    zonesLoading,
+  ]);
 
   // Loading state while Firebase auth state is being resolved
   if (authLoading) {
@@ -241,13 +292,49 @@ function AuthenticatedApp() {
   const handleAddSafeZone = async (zoneData) => {
     if (!currentUser?.uid)
       return { success: false, error: "User unauthenticated" };
-    return await createSafeZone(currentUser.uid, zoneData);
+    const result = await createSafeZone(currentUser.uid, zoneData);
+    if (result.success && result.zone) {
+      const updatedZones = [...safeZones, result.zone];
+      evaluatePetsAndGenerateAlerts({
+        uid: currentUser.uid,
+        pets,
+        safeZones: updatedZones,
+        settings,
+        alerts,
+        onNewAlert: triggerAlertToast,
+      }).catch((err) =>
+        console.error(
+          "[AlertEngine] Immediate add-zone evaluation error:",
+          err,
+        ),
+      );
+    }
+    return result;
   };
 
   const handleUpdateSafeZone = async (zoneId, zoneData) => {
     if (!currentUser?.uid)
       return { success: false, error: "User unauthenticated" };
-    return await updateSafeZone(currentUser.uid, zoneId, zoneData);
+    const result = await updateSafeZone(currentUser.uid, zoneId, zoneData);
+    if (result.success) {
+      const updatedZones = safeZones.map((z) =>
+        z.id === zoneId ? { ...z, ...zoneData } : z,
+      );
+      evaluatePetsAndGenerateAlerts({
+        uid: currentUser.uid,
+        pets,
+        safeZones: updatedZones,
+        settings,
+        alerts,
+        onNewAlert: triggerAlertToast,
+      }).catch((err) =>
+        console.error(
+          "[AlertEngine] Immediate update-zone evaluation error:",
+          err,
+        ),
+      );
+    }
+    return result;
   };
 
   const handleDeleteSafeZone = async (zoneToDelete) => {
@@ -263,6 +350,18 @@ function AuthenticatedApp() {
     return await markAlertResolved(currentUser.uid, alertId);
   };
 
+  const handleClearAllAlerts = async () => {
+    if (!currentUser?.uid)
+      return { success: false, error: "User unauthenticated" };
+    const result = await clearAllAlerts(currentUser.uid);
+    if (result.success) {
+      setAlerts([]);
+      setNotificationAlerts([]);
+      resetAlertEngineState();
+    }
+    return result;
+  };
+
   const handleNavigateToAddSafeZone = () => {
     setActiveTab("zones");
   };
@@ -273,6 +372,11 @@ function AuthenticatedApp() {
       setActiveTab={setActiveTab}
       unresolvedAlertsCount={unresolvedAlertsCount}
     >
+      <AlertToastContainer
+        alerts={notificationAlerts}
+        onDismiss={handleDismissToast}
+        onNavigateToAlerts={handleToastClick}
+      />
       <div key={activeTab} className="animate-page-fade">
         {activeTab === "dashboard" && (
           <DashboardScreen
@@ -306,7 +410,11 @@ function AuthenticatedApp() {
         )}
 
         {activeTab === "alerts" && (
-          <AlertsScreen alerts={alerts} onResolveAlert={handleResolveAlert} />
+          <AlertsScreen
+            alerts={alerts}
+            onResolveAlert={handleResolveAlert}
+            onClearAll={handleClearAllAlerts}
+          />
         )}
 
         {activeTab === "settings" && (

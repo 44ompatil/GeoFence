@@ -44,7 +44,7 @@ function normalizeZoneDoc(docSnap) {
   return {
     id: docSnap.id,
     name: data.name || 'Safe Zone',
-    shape: data.shape || data.type || 'Circle',
+    shape: data.shape || (Array.isArray(data.polygonPoints) && data.polygonPoints.length >= 3 ? 'Polygon' : 'Circle'),
     type: data.type || 'Safe Zone',
     lat,
     lng,

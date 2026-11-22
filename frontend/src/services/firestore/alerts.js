@@ -13,6 +13,23 @@ import {
 import { db } from '../../firebase.js';
 
 /**
+ * Extracts a numeric timestamp in milliseconds from an alert object.
+ * Supports Firestore Timestamps, JS Dates, seconds/nanoseconds, numeric values, and fallback.
+ */
+export function getAlertTimestampMs(alert) {
+  if (!alert) return 0;
+  if (alert.createdAt?.toMillis) return alert.createdAt.toMillis();
+  if (alert.createdAt?.toDate) return alert.createdAt.toDate().getTime();
+  if (alert.createdAt instanceof Date) return alert.createdAt.getTime();
+  if (typeof alert.createdAt === 'number') return alert.createdAt;
+  if (typeof alert.createdAt?.seconds === 'number') {
+    return alert.createdAt.seconds * 1000 + (alert.createdAt.nanoseconds || 0) / 1e6;
+  }
+  if (alert._localTimestamp) return alert._localTimestamp;
+  return 0;
+}
+
+/**
  * Remove undefined values before writing to Firestore.
  */
 function sanitizeData(data) {
@@ -38,11 +55,14 @@ function normalizeAlert(docSnap) {
 
   const isResolved = Boolean(data.resolved);
 
-  // Format timestamp for display
+  // Format timestamp for display with human-readable date/time
   let timestampDisplay = data.timestamp || '';
-  if (!timestampDisplay && data.createdAt?.toDate) {
+  if (data.createdAt?.toDate) {
     const d = data.createdAt.toDate();
-    timestampDisplay = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    timestampDisplay = isToday ? timeStr : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${timeStr}`;
   } else if (!timestampDisplay) {
     timestampDisplay = 'Just now';
   }
@@ -72,6 +92,7 @@ function normalizeAlert(docSnap) {
 
 /**
  * Subscribe to real-time alerts collection for the authenticated user.
+ * Alerts are consistently ordered newest first by creation timestamp.
  */
 export function subscribeAlerts(uid, onData, onError) {
   if (!uid) {
@@ -89,6 +110,8 @@ export function subscribeAlerts(uid, onData, onError) {
     q,
     (snapshot) => {
       const alerts = snapshot.docs.map(normalizeAlert);
+      // Ensure robust newest-first sorting even if serverTimestamp is resolving
+      alerts.sort((a, b) => getAlertTimestampMs(b) - getAlertTimestampMs(a));
       console.log(`[Firestore] Received ${alerts.length} alerts snapshot for UID: ${uid}`);
       onData(alerts);
     },
@@ -99,11 +122,7 @@ export function subscribeAlerts(uid, onData, onError) {
         alertsRef,
         (snapshot) => {
           const alerts = snapshot.docs.map(normalizeAlert);
-          alerts.sort((a, b) => {
-            const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
-            const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
-            return timeB - timeA;
-          });
+          alerts.sort((a, b) => getAlertTimestampMs(b) - getAlertTimestampMs(a));
           onData(alerts);
         },
         (fallbackError) => {
@@ -128,6 +147,7 @@ export async function getAlerts(uid) {
     const alertsRef = collection(db, 'users', uid, 'alerts');
     const snapshot = await getDocs(alertsRef);
     const alerts = snapshot.docs.map(normalizeAlert);
+    alerts.sort((a, b) => getAlertTimestampMs(b) - getAlertTimestampMs(a));
     return { success: true, alerts };
   } catch (error) {
     console.error('[Firestore] getAlerts error:', error);
@@ -144,7 +164,8 @@ export async function createAlert(uid, alertData) {
   try {
     const alertsRef = collection(db, 'users', uid, 'alerts');
 
-    const formattedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const localNow = new Date();
+    const formattedTime = localNow.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     const payload = sanitizeData({
       petId: alertData.petId || '',
@@ -175,6 +196,7 @@ export async function createAlert(uid, alertData) {
       alert: {
         id: docRef.id,
         ...payload,
+        _localTimestamp: localNow.getTime(),
       },
     };
   } catch (error) {
@@ -222,6 +244,31 @@ export async function deleteAlert(uid, alertId) {
     return { success: true };
   } catch (error) {
     console.error('[Firestore] deleteAlert error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Clear all alerts for the authenticated user from Firestore.
+ * Does not touch pets, safe zones, or user settings.
+ */
+export async function clearAllAlerts(uid) {
+  if (!uid) return { success: false, error: 'User is not authenticated' };
+
+  try {
+    const alertsRef = collection(db, 'users', uid, 'alerts');
+    const snapshot = await getDocs(alertsRef);
+    if (snapshot.empty) {
+      console.log(`[Firestore] clearAllAlerts: No alerts to delete for UID: ${uid}`);
+      return { success: true, count: 0 };
+    }
+
+    const deletePromises = snapshot.docs.map((docSnap) => deleteDoc(docSnap.ref));
+    await Promise.all(deletePromises);
+    console.log(`[Firestore] clearAllAlerts SUCCESS: Deleted ${deletePromises.length} alerts from users/${uid}/alerts`);
+    return { success: true, count: deletePromises.length };
+  } catch (error) {
+    console.error('[Firestore] clearAllAlerts error:', error);
     return { success: false, error: error.message };
   }
 }

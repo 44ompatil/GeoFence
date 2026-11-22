@@ -1,14 +1,23 @@
 import { useState } from 'react';
-import { CheckCircle2, Check, AlertTriangle, ShieldCheck } from 'lucide-react';
+import { CheckCircle2, Check, AlertTriangle, ShieldCheck, Trash2, Loader2 } from 'lucide-react';
+import ModalPortal from '../components/common/ModalPortal';
+import { getAlertTimestampMs } from '../services/firestore/alerts';
 
-export default function AlertsScreen({ alerts = [], onResolveAlert }) {
+export default function AlertsScreen({ alerts = [], onResolveAlert, onClearAll }) {
   const [filter, setFilter] = useState('all'); // 'all', 'active', 'resolved'
   const [resolvingId, setResolvingId] = useState(null);
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
 
   const filteredAlerts = alerts.filter((alert) => {
     if (filter === 'active') return !alert.resolved;
     if (filter === 'resolved') return alert.resolved;
     return true;
+  });
+
+  // Strict sorting: newest alerts always appear at the top
+  const sortedAlerts = [...filteredAlerts].sort((a, b) => {
+    return getAlertTimestampMs(b) - getAlertTimestampMs(a);
   });
 
   const getSeverityBadge = (severity, resolved) => {
@@ -68,6 +77,17 @@ export default function AlertsScreen({ alerts = [], onResolveAlert }) {
     }
   };
 
+  const handleConfirmClearAll = async () => {
+    if (!onClearAll || isClearing) return;
+    setIsClearing(true);
+    try {
+      await onClearAll();
+      setConfirmClearOpen(false);
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Page Header and Filters */}
@@ -81,8 +101,8 @@ export default function AlertsScreen({ alerts = [], onResolveAlert }) {
           </p>
         </div>
 
-        {/* Filter Buttons */}
-        <div className="flex items-center gap-2">
+        {/* Action Controls: Filter Buttons + Clear All */}
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => setFilter('all')}
             className={`rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
@@ -91,7 +111,7 @@ export default function AlertsScreen({ alerts = [], onResolveAlert }) {
                 : 'bg-white border border-gray-200 text-gray-600 hover:text-gray-900 hover:bg-gray-50'
             }`}
           >
-            All Alerts
+            All Alerts ({alerts.length})
           </button>
           <button
             onClick={() => setFilter('active')}
@@ -101,7 +121,7 @@ export default function AlertsScreen({ alerts = [], onResolveAlert }) {
                 : 'bg-white border border-gray-200 text-gray-600 hover:text-gray-900 hover:bg-gray-50'
             }`}
           >
-            Active
+            Active ({alerts.filter((a) => !a.resolved).length})
           </button>
           <button
             onClick={() => setFilter('resolved')}
@@ -111,7 +131,19 @@ export default function AlertsScreen({ alerts = [], onResolveAlert }) {
                 : 'bg-white border border-gray-200 text-gray-600 hover:text-gray-900 hover:bg-gray-50'
             }`}
           >
-            Resolved
+            Resolved ({alerts.filter((a) => a.resolved).length})
+          </button>
+
+          {/* Clear All Button */}
+          <button
+            type="button"
+            onClick={() => setConfirmClearOpen(true)}
+            disabled={alerts.length === 0}
+            title={alerts.length === 0 ? 'No alerts to clear' : 'Clear all alerts from history'}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50/80 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ml-auto sm:ml-2"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span>Clear All</span>
           </button>
         </div>
       </div>
@@ -143,8 +175,8 @@ export default function AlertsScreen({ alerts = [], onResolveAlert }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {filteredAlerts.length > 0 ? (
-                filteredAlerts.map((alert) => {
+              {sortedAlerts.length > 0 ? (
+                sortedAlerts.map((alert) => {
                   const isResolved = Boolean(alert.resolved);
                   return (
                     <tr
@@ -227,6 +259,63 @@ export default function AlertsScreen({ alerts = [], onResolveAlert }) {
           </table>
         </div>
       </div>
+
+      {/* Clear All Confirmation Modal */}
+      <ModalPortal
+        isOpen={confirmClearOpen}
+        onClose={() => !isClearing && setConfirmClearOpen(false)}
+        maxWidthClass="max-w-md"
+      >
+        <div className="w-full rounded-2xl bg-white p-6 shadow-2xl border border-gray-100">
+          <div className="flex items-start gap-3.5">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-100 text-red-600 shadow-xs">
+              <Trash2 className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-gray-900 leading-snug">
+                Clear All Alerts?
+              </h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                This will permanently remove all {alerts.length} alert(s) from your account history.
+              </p>
+            </div>
+          </div>
+
+          <div className="my-4 rounded-xl bg-gray-50 p-3.5 text-xs text-gray-600 border border-gray-200/80 leading-relaxed">
+            This action only removes past alert records. Your registered pets, configured safe zones, and live tracking settings will remain intact.
+          </div>
+
+          <div className="flex items-center justify-end gap-2.5 pt-1">
+            <button
+              type="button"
+              onClick={() => setConfirmClearOpen(false)}
+              disabled={isClearing}
+              className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmClearAll}
+              disabled={isClearing}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-red-700 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {isClearing ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Clearing...</span>
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Yes, Clear All</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </ModalPortal>
     </div>
   );
 }
+
