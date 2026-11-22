@@ -13,12 +13,28 @@
 #define GEOFENCE_WIFI_PASSWORD ""
 #endif
 
-#ifndef GEOFENCE_INGEST_URL
-#define GEOFENCE_INGEST_URL ""
+#ifndef GEOFENCE_FIREBASE_API_KEY
+#define GEOFENCE_FIREBASE_API_KEY ""
 #endif
 
-#ifndef GEOFENCE_DEVICE_TOKEN
-#define GEOFENCE_DEVICE_TOKEN ""
+#ifndef GEOFENCE_AUTH_EMAIL
+#define GEOFENCE_AUTH_EMAIL ""
+#endif
+
+#ifndef GEOFENCE_AUTH_PASSWORD
+#define GEOFENCE_AUTH_PASSWORD ""
+#endif
+
+#ifndef GEOFENCE_PROJECT_ID
+#define GEOFENCE_PROJECT_ID ""
+#endif
+
+#ifndef GEOFENCE_OWNER_UID
+#define GEOFENCE_OWNER_UID ""
+#endif
+
+#ifndef GEOFENCE_PET_ID
+#define GEOFENCE_PET_ID ""
 #endif
 
 // ============================================================================
