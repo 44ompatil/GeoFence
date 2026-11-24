@@ -1,4 +1,4 @@
-import { setOptions, importLibrary } from '@googlemaps/js-api-loader';
+import { setOptions, importLibrary } from "@googlemaps/js-api-loader";
 
 let isOptionsSet = false;
 let loadPromise = null;
@@ -6,54 +6,54 @@ let loadPromise = null;
 // Default map style matching the GeoFence Figma aesthetic (clean warm roads, sage parks, subtle labels)
 export const GEOFENCE_MAP_STYLE = [
   {
-    featureType: 'water',
-    elementType: 'geometry',
-    stylers: [{ color: '#c9d7d6' }],
+    featureType: "water",
+    elementType: "geometry",
+    stylers: [{ color: "#c9d7d6" }],
   },
   {
-    featureType: 'landscape',
-    elementType: 'geometry',
-    stylers: [{ color: '#dfe5d5' }],
+    featureType: "landscape",
+    elementType: "geometry",
+    stylers: [{ color: "#dfe5d5" }],
   },
   {
-    featureType: 'road',
-    elementType: 'geometry',
-    stylers: [{ color: '#f4f6ec' }],
+    featureType: "road",
+    elementType: "geometry",
+    stylers: [{ color: "#f4f6ec" }],
   },
   {
-    featureType: 'road',
-    elementType: 'geometry.stroke',
-    stylers: [{ color: '#e2e7d8' }, { weight: 1 }],
+    featureType: "road",
+    elementType: "geometry.stroke",
+    stylers: [{ color: "#e2e7d8" }, { weight: 1 }],
   },
   {
-    featureType: 'road.highway',
-    elementType: 'geometry',
-    stylers: [{ color: '#ffffff' }],
+    featureType: "road.highway",
+    elementType: "geometry",
+    stylers: [{ color: "#ffffff" }],
   },
   {
-    featureType: 'poi.park',
-    elementType: 'geometry',
-    stylers: [{ color: '#c8d6be' }],
+    featureType: "poi.park",
+    elementType: "geometry",
+    stylers: [{ color: "#c8d6be" }],
   },
   {
-    featureType: 'poi',
-    elementType: 'labels',
-    stylers: [{ visibility: 'simplified' }],
+    featureType: "poi",
+    elementType: "labels",
+    stylers: [{ visibility: "simplified" }],
   },
   {
-    featureType: 'administrative',
-    elementType: 'labels.text.fill',
-    stylers: [{ color: '#4b5563' }],
+    featureType: "administrative",
+    elementType: "labels.text.fill",
+    stylers: [{ color: "#4b5563" }],
   },
   {
-    featureType: 'road',
-    elementType: 'labels.text.fill',
-    stylers: [{ color: '#6b7280' }],
+    featureType: "road",
+    elementType: "labels.text.fill",
+    stylers: [{ color: "#6b7280" }],
   },
 ];
 
-export const DEFAULT_MAP_CENTER = { lat: 18.6445, lng: 73.7550 };
-export const DEFAULT_MAP_ZOOM = 16;
+export const DEFAULT_MAP_CENTER = { lat: 0, lng: 0 };
+export const DEFAULT_MAP_ZOOM = 2;
 
 /**
  * Loads the Google Maps JavaScript API asynchronously.
@@ -63,11 +63,15 @@ export const DEFAULT_MAP_ZOOM = 16;
 export function loadGoogleMaps() {
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
-  if (!apiKey || apiKey === 'your_api_key' || apiKey === 'your_google_maps_api_key_here') {
+  if (
+    !apiKey ||
+    apiKey === "your_api_key" ||
+    apiKey === "your_google_maps_api_key_here"
+  ) {
     return Promise.reject(
       new Error(
-        'Missing Google Maps API Key. Please set VITE_GOOGLE_MAPS_API_KEY in your frontend/.env file.'
-      )
+        "Missing Google Maps API Key. Please set VITE_GOOGLE_MAPS_API_KEY in your frontend/.env file.",
+      ),
     );
   }
 
@@ -78,17 +82,17 @@ export function loadGoogleMaps() {
   if (!isOptionsSet) {
     setOptions({
       key: apiKey,
-      v: 'weekly',
+      v: "weekly",
     });
     isOptionsSet = true;
   }
 
   loadPromise = Promise.all([
-    importLibrary('maps'),
-    importLibrary('core'),
-    importLibrary('places'),
-    importLibrary('geometry'),
-    importLibrary('marker'),
+    importLibrary("maps"),
+    importLibrary("core"),
+    importLibrary("places"),
+    importLibrary("geometry"),
+    importLibrary("marker"),
   ])
     .then(([mapsLib, coreLib, placesLib, geometryLib, markerLib]) => {
       const gMaps = {
@@ -121,12 +125,18 @@ export function loadGoogleMaps() {
  * Creates a custom Google Maps OverlayView for rendering rich HTML DOM elements
  * (e.g. Pet pulse markers, Zone action labels, Draggable Center Pin).
  */
-export function createCustomOverlay(maps, position, contentElement, options = {}) {
-  const OverlayViewClass = maps?.OverlayView || window.google?.maps?.OverlayView;
+export function createCustomOverlay(
+  maps,
+  position,
+  contentElement,
+  options = {},
+) {
+  const OverlayViewClass =
+    maps?.OverlayView || window.google?.maps?.OverlayView;
   const LatLngClass = maps?.LatLng || window.google?.maps?.LatLng;
 
   if (!OverlayViewClass) {
-    throw new Error('Google Maps OverlayView is not loaded.');
+    throw new Error("Google Maps OverlayView is not loaded.");
   }
 
   class CustomOverlay extends OverlayViewClass {
@@ -139,7 +149,7 @@ export function createCustomOverlay(maps, position, contentElement, options = {}
 
     onAdd() {
       const panes = this.getPanes();
-      const targetPane = this.options.pane || 'overlayMouseTarget';
+      const targetPane = this.options.pane || "overlayMouseTarget";
       panes[targetPane].appendChild(this.content);
     }
 
@@ -154,10 +164,10 @@ export function createCustomOverlay(maps, position, contentElement, options = {}
       const point = projection.fromLatLngToDivPixel(latLng);
 
       if (point) {
-        this.content.style.position = 'absolute';
+        this.content.style.position = "absolute";
         this.content.style.left = `${point.x}px`;
         this.content.style.top = `${point.y}px`;
-        this.content.style.zIndex = this.options.zIndex || '100';
+        this.content.style.zIndex = this.options.zIndex || "100";
       }
     }
 

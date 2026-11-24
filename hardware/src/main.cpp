@@ -19,11 +19,14 @@
 #include <HardwareSerial.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <ssl_client.h>
+#include <mbedtls/x509_crt.h>
 #include <HTTPClient.h>
 #include <TinyGPSPlus.h>
 #include <ArduinoJson.h>
 #include <string.h>
 #include <time.h>
+#include <esp_sntp.h>
 
 #include "Config.h"
 #include "MPU_Driver.h"
@@ -50,12 +53,18 @@ int batteryPercent = 90;
 // Geofence risk state
 RiskState currentRisk = RISK_SAFE;
 float distanceToCenter = 0.0f;
-float distanceToBoundary = DEFAULT_RADIUS_METERS;
-double safeZoneLat = DEFAULT_SAFE_LAT;
-double safeZoneLng = DEFAULT_SAFE_LNG;
-float safeZoneRadiusMeters = DEFAULT_RADIUS_METERS;
-float safeZoneWarningMeters = DEFAULT_WARNING_METERS;
-String safeZoneName = DEFAULT_SAFE_ZONE;
+float distanceToBoundary = 0.0f;
+double safeZoneLat = 0.0;
+double safeZoneLng = 0.0;
+float safeZoneRadiusMeters = 0.0f;
+float safeZoneWarningMeters = 0.0f;
+String safeZoneName;
+String safeZoneId;
+bool safeZoneConfigValid = false;
+unsigned long lastSafeZoneRefreshMs = 0;
+unsigned long lastSafeZoneFetchAttemptMs = 0;
+static const unsigned long SAFE_ZONE_REFRESH_INTERVAL_MS = 15000UL;
+static const unsigned long SAFE_ZONE_MAX_AGE_MS = 30000UL;
 
 bool simulationMode = false;
 char serialLineBuffer[512];
@@ -72,6 +81,16 @@ unsigned long lastWifiRetryMs = 0;
 bool wifiStarted = false;
 bool clockSyncRequested = false;
 bool wifiConfigWarningPrinted = false;
+bool wifiConnectedLogged = false;
+volatile bool ntpSyncNotification = false;
+bool ntpSyncConfirmed = false;
+bool ntpTimeoutReported = false;
+unsigned long ntpSyncStartedMs = 0;
+
+void onNtpTimeSync(struct timeval* tv) {
+    (void)tv;
+    ntpSyncNotification = true;
+}
 
 static const char* FIREBASE_ROOT_CA = R"PEM(
 -----BEGIN CERTIFICATE-----
@@ -105,7 +124,150 @@ Z6tGn6D/Qqc6f1zLXbBwHSs09dR2CQzreExZBfMzQsNhFRAbd03OIozUhfJFfbdT
 2tIMPNuzjsmhDYAPexZ3FL//2wmUspO8IFgV6dtxQ/PeEMMA3KgqlbbC1j+Qa3bb
 bP6MvPJwNQzcmRk13NfIRmPVNnGuV/u3gm3c
 -----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD
+VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG
+A1UEAxMLR1RTIFJvb3QgUjQwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAwMDAw
+WjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2Vz
+IExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjQwdjAQBgcqhkjOPQIBBgUrgQQAIgNi
+AATzdHOnaItgrkO4NcWBMHtLSZ37wWHO5t5GvWvVYRg1rkDdc/eJkTBa6zzuhXyi
+QHY7qca4R9gq55KRanPpsXI5nymfopjTX15YhmUPoYRlBtHci8nHc8iMai/lxKvR
+HYqjQjBAMA4GA1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQW
+BBSATNbrdP9JNqPV2Py1PsVq8JQdjDAKBggqhkjOPQQDAwNpADBmAjEA6ED/g94D
+9J+uHXqnLrmvT/aDHQ4thQEd0dlq7A/Cr8deVl5c1RxYIigL9zC2L7F8AjEA8GE8
+p/SgguMh1YQdc4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD
+-----END CERTIFICATE-----
 )PEM";
+
+class DiagnosticWiFiClientSecure : public WiFiClientSecure {
+public:
+    int connect(const char* host, uint16_t port) override {
+        IPAddress address;
+        if (!WiFi.hostByName(host, address)) {
+            _lastError = -1;
+            Serial.printf("[TLS] DNS lookup failed for %s.\n", host);
+            return 0;
+        }
+
+        const int result = start_ssl_client(sslclient, address, port, host,
+            _timeout, _CA_cert, _use_ca_bundle, _cert, _private_key,
+            _pskIdent, _psKey, _use_insecure, _alpn_protos);
+        _lastError = result;
+        if (result < 0) {
+            const uint32_t verifyFlags = mbedtls_ssl_get_verify_result(&sslclient->ssl_ctx);
+            if (verifyFlags != 0) {
+                char verifyInfo[256] = {0};
+                mbedtls_x509_crt_verify_info(verifyInfo, sizeof(verifyInfo), "  - ", verifyFlags);
+                Serial.printf("[TLS] Certificate verification for %s failed; flags=0x%08lx:\n%s",
+                    host, (unsigned long)verifyFlags, verifyInfo);
+            } else {
+                Serial.printf("[TLS] Handshake failed with no X.509 verify flags (error %d).\n", result);
+            }
+            stop();
+            return 0;
+        }
+
+        _connected = true;
+        return 1;
+    }
+};
+
+bool isSystemTimePlausible(time_t timestamp) {
+    // Reject the ESP32's unset clock and obviously stale dates before TLS.
+    return timestamp >= 1704067200; // 2024-01-01 00:00:00 UTC
+}
+
+bool isValidCoordinate(double lat, double lng);
+
+void printSystemTime(const char* context) {
+    const time_t now = time(nullptr);
+    struct tm utcTime;
+    if (isSystemTimePlausible(now) && gmtime_r(&now, &utcTime) != nullptr) {
+        char formatted[24];
+        strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M:%S UTC", &utcTime);
+        Serial.printf("[TIME] %s: %s (epoch %lld)\n", context, formatted, (long long)now);
+    } else {
+        Serial.printf("[TIME] %s: invalid/unset (epoch %lld)\n", context, (long long)now);
+    }
+}
+
+bool hasRealGpsFix() {
+    return !simulationMode && hasGpsFix &&
+        gps.location.isValid() && gps.location.age() < 2000 &&
+        isValidCoordinate(currentLat, currentLng);
+}
+
+bool hasUsableGeofenceLocation() {
+    return simulationMode
+        ? hasGpsFix && isValidCoordinate(currentLat, currentLng)
+        : hasRealGpsFix();
+}
+
+String currentGpsTimestamp() {
+    const time_t now = time(nullptr);
+    struct tm utcTime;
+    if (!isSystemTimePlausible(now) || gmtime_r(&now, &utcTime) == nullptr) {
+        return String();
+    }
+
+    char formatted[25];
+    if (strftime(formatted, sizeof(formatted), "%Y-%m-%dT%H:%M:%SZ", &utcTime) == 0) {
+        return String();
+    }
+    return String(formatted);
+}
+
+bool ensureNetworkTime() {
+    if (!clockSyncRequested) {
+        sntp_set_time_sync_notification_cb(onNtpTimeSync);
+        configTime(0, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+        clockSyncRequested = true;
+        ntpSyncStartedMs = millis();
+        Serial.println("[NTP] Synchronization started; HTTPS remains blocked until SNTP confirms a valid clock.");
+    }
+
+    if (ntpSyncNotification) {
+        ntpSyncNotification = false;
+        const time_t now = time(nullptr);
+        if (isSystemTimePlausible(now)) {
+            ntpSyncConfirmed = true;
+            ntpTimeoutReported = false;
+            Serial.println("[NTP] Synchronization succeeded.");
+            printSystemTime("After NTP synchronization");
+        } else {
+            Serial.println("[NTP] Update notification received, but the system clock is still invalid.");
+        }
+    }
+
+    if (!ntpSyncConfirmed) {
+        if (!ntpTimeoutReported && millis() - ntpSyncStartedMs >= 30000UL) {
+            Serial.println("[NTP] Synchronization failed: no valid SNTP time received within 30 seconds; HTTPS is still blocked.");
+            printSystemTime("NTP timeout");
+            ntpTimeoutReported = true;
+        }
+        return false;
+    }
+
+    if (!isSystemTimePlausible(time(nullptr))) {
+        ntpSyncConfirmed = false;
+        Serial.println("[NTP] System clock became invalid; blocking HTTPS requests.");
+        return false;
+    }
+    return true;
+}
+
+void logHttpsOutcome(const char* service, int responseCode, DiagnosticWiFiClientSecure& secureClient) {
+    if (responseCode > 0) {
+        Serial.printf("[TLS] %s verified HTTPS connection succeeded; HTTP %d.\n", service, responseCode);
+        return;
+    }
+
+    char tlsError[128] = {0};
+    const int tlsErrorCode = secureClient.lastError(tlsError, sizeof(tlsError));
+    Serial.printf("[TLS] %s failed before an HTTP response (HTTPClient %d; TLS %d: %s).\n",
+        service, responseCode, tlsErrorCode,
+        tlsError[0] ? tlsError : "no TLS detail available");
+}
 
 // ----------------------------------------------------------------------------
 // HARDWARE INITIALIZATION
@@ -191,36 +353,7 @@ void handleSerialCommand(const char* line) {
     const char* type = command["type"] | "";
 
     if (strcmp(type, "safeZone") == 0 || strcmp(type, "config") == 0) {
-        double lat = NAN;
-        double lng = NAN;
-        if (command["center"]["lat"].is<double>()) {
-            lat = command["center"]["lat"].as<double>();
-        } else if (command["lat"].is<double>()) {
-            lat = command["lat"].as<double>();
-        }
-        if (command["center"]["lng"].is<double>()) {
-            lng = command["center"]["lng"].as<double>();
-        } else if (command["lng"].is<double>()) {
-            lng = command["lng"].as<double>();
-        }
-
-        const double radius = command["radiusMeters"] | NAN;
-        const double warning = command["warningDistanceMeters"] | safeZoneWarningMeters;
-        const char* name = command["name"] | DEFAULT_SAFE_ZONE;
-        if (!isValidCoordinate(lat, lng) || !isfinite(radius) ||
-            radius <= 0.0 || radius > 100000.0 ||
-            !isfinite(warning) || warning < 0.0 || warning >= radius ||
-            strlen(name) > 64) {
-            printCommandAck(type, false, "Invalid center, radius, or warning distance");
-            return;
-        }
-
-        safeZoneLat = lat;
-        safeZoneLng = lng;
-        safeZoneRadiusMeters = (float)radius;
-        safeZoneWarningMeters = (float)warning;
-        safeZoneName = name;
-        printCommandAck(type, true, "Safe zone updated");
+        printCommandAck(type, false, "Safe-zone configuration is managed by the dashboard and loaded from Firestore");
         return;
     }
 
@@ -292,10 +425,11 @@ void processSerialInput() {
 // RISK DECISION ENGINE & SENSOR FUSION
 // ----------------------------------------------------------------------------
 void updateRiskEngine() {
-    if (!hasGpsFix) {
+    if (!hasUsableGeofenceLocation() || !safeZoneConfigValid ||
+        millis() - lastSafeZoneRefreshMs >= SAFE_ZONE_MAX_AGE_MS) {
         currentRisk = RISK_SAFE;
         distanceToCenter = 0.0f;
-        distanceToBoundary = safeZoneRadiusMeters;
+        distanceToBoundary = 0.0f;
         return;
     }
 
@@ -307,14 +441,6 @@ void updateRiskEngine() {
         distanceToCenter, distanceToBoundary
     );
 
-    // Sensor Fusion: Escalate if pet is near boundary AND running at high speed
-    if (currentRisk == RISK_CAUTION) {
-        bool isRunning = (currentMpuData.activity == "HIGH MOVEMENT") || (currentSpeedKmH > 7.0);
-        if (isRunning && distanceToBoundary < (safeZoneWarningMeters * 0.6f)) {
-            // Rapid trajectory towards fence -> Pre-emptive escalation to HIGH RISK
-            currentRisk = RISK_HIGH_RISK;
-        }
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -323,7 +449,8 @@ void updateRiskEngine() {
 void updateAlertOutputs() {
     unsigned long now = millis();
 
-    if (!hasGpsFix) {
+    if (!hasUsableGeofenceLocation() || !safeZoneConfigValid ||
+        millis() - lastSafeZoneRefreshMs >= SAFE_ZONE_MAX_AGE_MS) {
         digitalWrite(PIN_LED_GREEN, LOW);
         digitalWrite(PIN_LED_YELLOW, LOW);
         digitalWrite(PIN_LED_RED, LOW);
@@ -384,41 +511,137 @@ static String firebaseIdToken    = "";
 static String firebaseRefreshTok = "";
 static unsigned long lastTokenRefreshMs = 0;
 static bool tokenBootstrapped = false;
+static unsigned long authLastFailureMs = 0;
+static unsigned long authRetryDelayMs = 0;
+static unsigned long authLastBackoffNoticeMs = 0;
+static uint8_t authFailureCount = 0;
+static bool authBackoffActive = false;
+
+static const char* FIREBASE_AUTH_HOST = "identitytoolkit.googleapis.com";
+
+bool logFirebaseErrorCode(const String& responseBody, const char* operation) {
+    JsonDocument response;
+    if (deserializeJson(response, responseBody) != DeserializationError::Ok) {
+        Serial.printf("[Auth] %s error body was not valid JSON; body suppressed.\n", operation);
+        return false;
+    }
+
+    const char* code = response["error"]["message"] | "";
+    if (code[0] == '\0') {
+        Serial.printf("[Auth] %s returned no Firebase error code; body suppressed.\n", operation);
+        return false;
+    }
+
+    // Firebase error identifiers use uppercase letters, digits, and underscores.
+    // Reject anything else rather than risking accidental data disclosure.
+    for (const char* character = code; *character != '\0'; ++character) {
+        if (!((*character >= 'A' && *character <= 'Z') ||
+              (*character >= '0' && *character <= '9') || *character == '_')) {
+            Serial.printf("[Auth] %s returned an unrecognized error format; body suppressed.\n", operation);
+            return false;
+        }
+    }
+
+    Serial.printf("[Auth] %s Firebase error code: %s (response body suppressed).\n",
+        operation, code);
+    return true;
+}
+
+void scheduleAuthRetry() {
+    static const unsigned long retryDelaysMs[] = {
+        30000UL, 60000UL, 120000UL, 240000UL, 480000UL, 900000UL
+    };
+    if (authFailureCount < sizeof(retryDelaysMs) / sizeof(retryDelaysMs[0])) {
+        ++authFailureCount;
+    }
+    const size_t retryIndex = authFailureCount == 0
+        ? 0
+        : authFailureCount - 1;
+    authRetryDelayMs = retryDelaysMs[retryIndex];
+    authLastFailureMs = millis();
+    authBackoffActive = true;
+    authLastBackoffNoticeMs = authLastFailureMs;
+    Serial.printf("[Auth] Retry delayed %lu seconds (failure #%u).\n",
+        authRetryDelayMs / 1000UL, authFailureCount);
+}
+
+void clearAuthRetryBackoff() {
+    authFailureCount = 0;
+    authRetryDelayMs = 0;
+    authBackoffActive = false;
+}
 
 // Sign in with email + password.
 // POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=API_KEY
 bool signInWithEmailPassword() {
-    if (strlen(GEOFENCE_FIREBASE_API_KEY) == 0 || strlen(GEOFENCE_AUTH_EMAIL) == 0) {
-        Serial.println("[Auth] Set GEOFENCE_FIREBASE_API_KEY and GEOFENCE_AUTH_EMAIL in Secrets.h.");
+    const bool apiKeyConfigured = strlen(GEOFENCE_FIREBASE_API_KEY) > 0;
+    const bool emailConfigured = strlen(GEOFENCE_AUTH_EMAIL) > 0;
+    const bool passwordConfigured = strlen(GEOFENCE_AUTH_PASSWORD) > 0;
+    const bool projectConfigured = strlen(GEOFENCE_PROJECT_ID) > 0;
+    Serial.printf("[Auth] Endpoint host=%s; API key configured=%s; project configured=%s.\n",
+        FIREBASE_AUTH_HOST, apiKeyConfigured ? "yes" : "no",
+        projectConfigured ? "yes" : "no");
+    if (!apiKeyConfigured || !emailConfigured || !passwordConfigured || !projectConfigured) {
+        Serial.printf("[Auth] Required configuration present: API key=%s, email=%s, password=%s, project=%s.\n",
+            apiKeyConfigured ? "yes" : "no", emailConfigured ? "yes" : "no",
+            passwordConfigured ? "yes" : "no", projectConfigured ? "yes" : "no");
         return false;
     }
 
-    WiFiClientSecure secureClient;
-    secureClient.setCACert(FIREBASE_ROOT_CA);
-
-    HTTPClient http;
-    http.setTimeout(8000);
-    String url = String("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=")
+    String url = String("https://") + FIREBASE_AUTH_HOST
+                 + "/v1/accounts:signInWithPassword?key="
                  + GEOFENCE_FIREBASE_API_KEY;
-    if (!http.begin(secureClient, url)) {
-        Serial.println("[Auth] Failed to begin sign-in request.");
-        return false;
-    }
-
-    http.addHeader("Content-Type", "application/json");
     JsonDocument req;
     req["email"]             = GEOFENCE_AUTH_EMAIL;
     req["password"]          = GEOFENCE_AUTH_PASSWORD;
     req["returnSecureToken"] = true;
-    String body;
-    serializeJson(req, body);
 
+    const bool fieldsPresent = req["email"].is<const char*>() &&
+        req["password"].is<const char*>() && req["returnSecureToken"].is<bool>();
+    const size_t expectedLength = measureJson(req);
+    String body;
+    const bool bufferReserved = expectedLength > 0 && body.reserve(expectedLength);
+    const size_t serializedLength = bufferReserved ? serializeJson(req, body) : 0;
+    const bool serializationSucceeded = bufferReserved && serializedLength == expectedLength &&
+        body.length() == expectedLength;
+    Serial.printf("[Auth] JSON serialization=%s; fields email=%s, password=%s, returnSecureToken=%s.\n",
+        serializationSucceeded ? "ok" : "failed",
+        req["email"].is<const char*>() ? "present" : "missing",
+        req["password"].is<const char*>() ? "present" : "missing",
+        req["returnSecureToken"].is<bool>() ? "present" : "missing");
+    if (!fieldsPresent || !serializationSucceeded) {
+        Serial.println("[Auth] Sign-in request not sent because its JSON payload was incomplete.");
+        return false;
+    }
+
+    DiagnosticWiFiClientSecure secureClient;
+    secureClient.setCACert(FIREBASE_ROOT_CA);
+
+    HTTPClient http;
+    http.setTimeout(8000);
+    if (!http.begin(secureClient, url)) {
+        Serial.printf("[Auth] Failed to initialize sign-in HTTPS request to %s; no request was sent.\n",
+            FIREBASE_AUTH_HOST);
+        return false;
+    }
+
+    http.addHeader("Content-Type", "application/json");
+    Serial.printf("[Auth] Sending sign-in POST to %s; payload values suppressed.\n",
+        FIREBASE_AUTH_HOST);
+
+    printSystemTime("Before Firebase sign-in HTTPS");
     int code = http.POST(body);
     String resp = http.getString();
+    logHttpsOutcome("Firebase Auth sign-in", code, secureClient);
+    Serial.printf("[Auth] Sign-in HTTP response: %d\n", code);
     http.end();
 
     if (code != 200) {
-        Serial.printf("[Auth] Sign-in failed (%d): %s\n", code, resp.c_str());
+        if (code > 0) {
+            logFirebaseErrorCode(resp, "Sign-in");
+        } else {
+            Serial.printf("[Auth] Sign-in transport failure: %s.\n", http.errorToString(code).c_str());
+        }
         return false;
     }
 
@@ -430,6 +653,12 @@ bool signInWithEmailPassword() {
 
     firebaseIdToken    = respDoc["idToken"].as<String>();
     firebaseRefreshTok = respDoc["refreshToken"].as<String>();
+    if (firebaseIdToken.isEmpty() || firebaseRefreshTok.isEmpty()) {
+        firebaseIdToken = "";
+        firebaseRefreshTok = "";
+        Serial.println("[Auth] Sign-in response did not contain both tokens; response body suppressed.");
+        return false;
+    }
     lastTokenRefreshMs = millis();
     tokenBootstrapped  = true;
     Serial.println("[Auth] Signed in to Firebase successfully.");
@@ -441,7 +670,7 @@ bool signInWithEmailPassword() {
 bool refreshIdToken() {
     if (firebaseRefreshTok.isEmpty()) return false;
 
-    WiFiClientSecure secureClient;
+    DiagnosticWiFiClientSecure secureClient;
     secureClient.setCACert(FIREBASE_ROOT_CA);
 
     HTTPClient http;
@@ -449,19 +678,27 @@ bool refreshIdToken() {
     String url = String("https://securetoken.googleapis.com/v1/token?key=")
                  + GEOFENCE_FIREBASE_API_KEY;
     if (!http.begin(secureClient, url)) {
-        Serial.println("[Auth] Failed to begin token refresh request.");
+        Serial.println("[Auth] Failed to initialize token-refresh HTTPS request; no connection was attempted.");
         return false;
     }
 
     http.addHeader("Content-Type", "application/x-www-form-urlencoded");
     String body = "grant_type=refresh_token&refresh_token=" + firebaseRefreshTok;
 
+    printSystemTime("Before Firebase token-refresh HTTPS");
     int code = http.POST(body);
     String resp = http.getString();
+    logHttpsOutcome("Firebase Auth token refresh", code, secureClient);
+    Serial.printf("[Auth] Token-refresh HTTP response: %d\n", code);
     http.end();
 
     if (code != 200) {
-        Serial.printf("[Auth] Token refresh failed (%d): %s\n", code, resp.c_str());
+        if (code > 0) {
+            logFirebaseErrorCode(resp, "Token refresh");
+        } else {
+            Serial.printf("[Auth] Token-refresh transport failure: %s.\n",
+                http.errorToString(code).c_str());
+        }
         return false;
     }
 
@@ -480,14 +717,35 @@ bool refreshIdToken() {
 
 // Ensure we have a valid token.  Call before every telemetry write.
 bool ensureValidToken() {
+    const unsigned long now = millis();
+    if (authBackoffActive && now - authLastFailureMs < authRetryDelayMs) {
+        if (now - authLastBackoffNoticeMs >= 60000UL) {
+            authLastBackoffNoticeMs = now;
+            const unsigned long remainingMs = authRetryDelayMs - (now - authLastFailureMs);
+            Serial.printf("[Auth] Retry backoff active; next attempt in at least %lu seconds.\n",
+                (remainingMs + 999UL) / 1000UL);
+        }
+        return false;
+    }
+
+    bool succeeded = false;
     if (!tokenBootstrapped) {
-        return signInWithEmailPassword();
+        succeeded = signInWithEmailPassword();
+    } else if (now - lastTokenRefreshMs >= 55UL * 60UL * 1000UL) {
+        // Refresh 5 minutes before the 60-minute expiry.
+        succeeded = refreshIdToken();
+    } else {
+        clearAuthRetryBackoff();
+        return true;
     }
-    // Refresh 5 minutes before the 60-minute expiry
-    if (millis() - lastTokenRefreshMs >= 55UL * 60UL * 1000UL) {
-        return refreshIdToken();
+
+    if (succeeded) {
+        clearAuthRetryBackoff();
+        return true;
     }
-    return true;
+
+    scheduleAuthRetry();
+    return false;
 }
 
 // ----------------------------------------------------------------------------
@@ -516,7 +774,23 @@ void startWifi() {
 }
 
 void maintainWifi() {
-    if (!wifiStarted || WiFi.status() == WL_CONNECTED) return;
+    if (!wifiStarted) return;
+
+    const wl_status_t status = WiFi.status();
+    if (status == WL_CONNECTED) {
+        if (!wifiConnectedLogged) {
+            const String ip = WiFi.localIP().toString();
+            Serial.printf("[WiFi] Connected; status=%d, IP=%s, RSSI=%d dBm.\n",
+                (int)status, ip.c_str(), WiFi.RSSI());
+            wifiConnectedLogged = true;
+        }
+        return;
+    }
+
+    if (wifiConnectedLogged) {
+        Serial.printf("[WiFi] Connection lost; status=%d.\n", (int)status);
+        wifiConnectedLogged = false;
+    }
 
     unsigned long now = millis();
     if (now - lastWifiRetryMs >= 15000) {
@@ -533,6 +807,8 @@ void maintainWifi() {
 String buildFirestorePatchBody() {
     JsonDocument doc;
     JsonObject fields = doc["fields"].to<JsonObject>();
+    const bool includeGpsCoordinates = hasRealGpsFix();
+    const bool geofenceReady = safeZoneConfigValid && hasUsableGeofenceLocation();
 
     // Helper lambdas for Firestore typed value objects
     auto strVal = [&](JsonObject parent, const char* key, const String& val) {
@@ -549,8 +825,11 @@ String buildFirestorePatchBody() {
     };
 
     strVal(fields, "deviceId", String(DEVICE_ID));
-    strVal(fields, "status",   String(GeoUtils::riskStateToString(currentRisk)));
-    strVal(fields, "riskLevel", String(GeoUtils::riskLevelToFrontend(currentRisk)));
+    strVal(fields, "status", !safeZoneConfigValid ? String("Zone Unavailable")
+        : !geofenceReady ? String("GPS Unavailable")
+        : String(GeoUtils::riskStateToString(currentRisk)));
+    strVal(fields, "riskLevel", geofenceReady
+        ? String(GeoUtils::riskLevelToFrontend(currentRisk)) : String("UNKNOWN"));
     strVal(fields, "heading",  currentHeading);
 
     char speedBuf[16];
@@ -558,15 +837,19 @@ String buildFirestorePatchBody() {
     strVal(fields, "speed", String(speedBuf));
 
     intVal(fields, "collarBattery", batteryPercent);
-    boolVal(fields, "hasFix", hasGpsFix);
+    boolVal(fields, "hasFix", includeGpsCoordinates);
+    intVal(fields, "satellites", satellitesCount);
 
-    if (hasGpsFix) {
+    if (includeGpsCoordinates) {
         dblVal(fields, "lat", currentLat);
         dblVal(fields, "lng", currentLng);
         dblVal(fields, "distanceToBoundary", round(distanceToBoundary * 10.0) / 10.0);
         dblVal(fields, "motionLevel", round(currentMpuData.motionAcceleration * 100.0) / 100.0);
         strVal(fields, "activity", String(currentMpuData.activity));
-        intVal(fields, "satellites", satellitesCount);
+        const String gpsTimestamp = currentGpsTimestamp();
+        if (gpsTimestamp.length() > 0) {
+            fields["gpsTimestamp"]["timestampValue"] = gpsTimestamp;
+        }
     }
 
     String payload;
@@ -577,9 +860,14 @@ String buildFirestorePatchBody() {
 // Build a simple JSON payload for the Serial monitor (unchanged format)
 String buildTelemetryPayload() {
     JsonDocument doc;
+    const bool includeGpsCoordinates = hasRealGpsFix();
+    const bool geofenceReady = safeZoneConfigValid && hasUsableGeofenceLocation();
     doc["deviceId"] = DEVICE_ID;
-    doc["status"]   = GeoUtils::riskStateToString(currentRisk);
-    doc["riskLevel"]= GeoUtils::riskLevelToFrontend(currentRisk);
+    doc["status"]   = !safeZoneConfigValid ? "Zone Unavailable"
+        : !geofenceReady ? "GPS Unavailable"
+        : GeoUtils::riskStateToString(currentRisk);
+    doc["riskLevel"]= geofenceReady
+        ? GeoUtils::riskLevelToFrontend(currentRisk) : "UNKNOWN";
     doc["heading"]  = currentHeading;
 
     char speedBuf[16];
@@ -587,20 +875,200 @@ String buildTelemetryPayload() {
     doc["speed"] = speedBuf;
 
     doc["collarBattery"] = batteryPercent;
-    doc["hasFix"]        = hasGpsFix;
+    doc["hasFix"]        = includeGpsCoordinates;
+    doc["satellites"]    = satellitesCount;
+    doc["coordinatesIncluded"] = includeGpsCoordinates;
+    doc["simulationMode"] = simulationMode;
 
-    if (hasGpsFix) {
+    if (includeGpsCoordinates) {
         doc["lat"]               = currentLat;
         doc["lng"]               = currentLng;
         doc["distanceToBoundary"]= round(distanceToBoundary * 10.0) / 10.0;
         doc["motionLevel"]       = round(currentMpuData.motionAcceleration * 100.0) / 100.0;
         doc["activity"]          = currentMpuData.activity;
-        doc["satellites"]        = satellitesCount;
+        const String gpsTimestamp = currentGpsTimestamp();
+        if (gpsTimestamp.length() > 0) {
+            doc["gpsTimestamp"] = gpsTimestamp;
+        }
     }
 
     String payload;
     serializeJson(doc, payload);
     return payload;
+}
+
+bool isSafeZoneDocumentId(const String& id) {
+    if (id.isEmpty() || id.length() > 150) return false;
+    for (size_t i = 0; i < id.length(); ++i) {
+        const char c = id[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool firestoreNumber(JsonVariantConst typedValue, double& value) {
+    JsonVariantConst doubleValue = typedValue["doubleValue"];
+    if (!doubleValue.isNull() && doubleValue.is<double>()) {
+        value = doubleValue.as<double>();
+        return isfinite(value);
+    }
+
+    JsonVariantConst integerValue = typedValue["integerValue"];
+    if (!integerValue.isNull()) {
+        const char* text = integerValue.as<const char*>();
+        if (text) {
+            char* end = nullptr;
+            value = strtod(text, &end);
+            return end != text && *end == '\0' && isfinite(value);
+        }
+    }
+
+    JsonVariantConst stringValue = typedValue["stringValue"];
+    if (!stringValue.isNull()) {
+        const char* text = stringValue.as<const char*>();
+        if (text) {
+            char* end = nullptr;
+            value = strtod(text, &end);
+            return end != text && isfinite(value);
+        }
+    }
+    return false;
+}
+
+bool firestoreGetDocument(const String& documentPath, JsonDocument& responseDoc,
+                          const char* description) {
+    const String url = String("https://firestore.googleapis.com/v1/projects/")
+        + GEOFENCE_PROJECT_ID + "/databases/(default)/documents/" + documentPath;
+    DiagnosticWiFiClientSecure secureClient;
+    secureClient.setCACert(FIREBASE_ROOT_CA);
+
+    HTTPClient request;
+    request.setTimeout(8000);
+    if (!request.begin(secureClient, url)) {
+        Serial.printf("[Zone] Could not initialize Firestore GET for %s.\n", description);
+        return false;
+    }
+    request.addHeader("Authorization", "Bearer " + firebaseIdToken);
+    const int responseCode = request.GET();
+    const String responseBody = responseCode == 200 ? request.getString() : String();
+    logHttpsOutcome(description, responseCode, secureClient);
+    request.end();
+
+    if (responseCode != 200) {
+        Serial.printf("[Zone] Firestore GET for %s failed with HTTP %d.\n",
+            description, responseCode);
+        return false;
+    }
+    if (deserializeJson(responseDoc, responseBody) != DeserializationError::Ok) {
+        Serial.printf("[Zone] Firestore GET response for %s was invalid JSON.\n", description);
+        return false;
+    }
+    return true;
+}
+
+bool refreshSafeZoneConfig() {
+    lastSafeZoneFetchAttemptMs = millis();
+    safeZoneConfigValid = false;
+
+    if (!wifiStarted || WiFi.status() != WL_CONNECTED || !ensureNetworkTime() ||
+        !ensureValidToken()) {
+        Serial.println("[Zone] Safe-zone refresh unavailable; current configuration will expire if it becomes stale.");
+        return false;
+    }
+
+    JsonDocument petDoc;
+    const String petPath = String("users/") + GEOFENCE_OWNER_UID + "/pets/" + GEOFENCE_PET_ID;
+    if (!firestoreGetDocument(petPath, petDoc, "Firestore pet configuration")) {
+        Serial.println("[Zone] Safe-zone configuration unavailable: could not read paired pet.");
+        return false;
+    }
+
+    const char* assignedId = petDoc["fields"]["safeZoneId"]["stringValue"] | "";
+    const String requestedZoneId(assignedId);
+    if (!isSafeZoneDocumentId(requestedZoneId)) {
+        safeZoneConfigValid = false;
+        Serial.println("[Zone] Safe-zone configuration unavailable: pet has no valid safeZoneId.");
+        return false;
+    }
+    if (!safeZoneId.isEmpty() && requestedZoneId != safeZoneId) {
+        Serial.println("[Zone] Pet assignment changed; previous zone disabled while the new assignment loads.");
+    }
+
+    JsonDocument zoneDoc;
+    const String zonePath = String("users/") + GEOFENCE_OWNER_UID + "/safeZones/" + requestedZoneId;
+    if (!firestoreGetDocument(zonePath, zoneDoc, "Firestore assigned safe zone")) {
+        Serial.printf("[Zone] Safe-zone configuration unavailable: assigned zone '%s' could not be read.\n",
+            requestedZoneId.c_str());
+        return false;
+    }
+
+    JsonVariantConst fields = zoneDoc["fields"];
+    const char* shape = fields["shape"]["stringValue"] | "";
+    if (strcmp(shape, "Circle") != 0) {
+        Serial.printf("[Zone] Safe-zone configuration unavailable: shape '%s' is not supported by the circle geofence.\n",
+            shape);
+        return false;
+    }
+
+    JsonVariantConst centerFields = fields["center"]["mapValue"]["fields"];
+    JsonVariantConst latValue = centerFields["lat"];
+    JsonVariantConst lngValue = centerFields["lng"];
+    if (latValue.isNull()) latValue = fields["lat"];
+    if (lngValue.isNull()) lngValue = fields["lng"];
+
+    double zoneLat = 0.0;
+    double zoneLng = 0.0;
+    double radiusMeters = 0.0;
+    double warningMeters = 0.0;
+    if (!firestoreNumber(latValue, zoneLat) || !firestoreNumber(lngValue, zoneLng) ||
+        !firestoreNumber(fields["radiusMeters"], radiusMeters)) {
+        Serial.println("[Zone] Safe-zone configuration unavailable: center or radius is missing/invalid.");
+        return false;
+    }
+
+    JsonVariantConst warningValue = fields["warningDistanceMeters"];
+    if (warningValue.isNull()) warningValue = fields["warningDistance"];
+    if (!firestoreNumber(warningValue, warningMeters) ||
+        !isValidCoordinate(zoneLat, zoneLng) || !isfinite(radiusMeters) ||
+        radiusMeters <= 0.0 || radiusMeters > 100000.0 ||
+        !isfinite(warningMeters) || warningMeters < 0.0 || warningMeters >= radiusMeters) {
+        Serial.println("[Zone] Safe-zone configuration unavailable: values failed validation.");
+        return false;
+    }
+
+    const char* zoneName = fields["name"]["stringValue"] | "";
+    if (strlen(zoneName) > 64) {
+        Serial.println("[Zone] Safe-zone configuration unavailable: name is too long.");
+        return false;
+    }
+
+    // Apply the fetched configuration atomically only after every field validates.
+    safeZoneId = requestedZoneId;
+    safeZoneName = zoneName;
+    safeZoneLat = zoneLat;
+    safeZoneLng = zoneLng;
+    safeZoneRadiusMeters = (float)radiusMeters;
+    safeZoneWarningMeters = (float)warningMeters;
+    safeZoneConfigValid = true;
+    lastSafeZoneRefreshMs = millis();
+    Serial.printf("[Zone] Loaded Firestore safe zone '%s' (%s): center %.7f, %.7f; radius %.1f m; warning %.1f m.\n",
+        safeZoneName.c_str(), safeZoneId.c_str(), safeZoneLat, safeZoneLng,
+        safeZoneRadiusMeters, safeZoneWarningMeters);
+    return true;
+}
+
+void maintainSafeZoneConfig() {
+    const unsigned long now = millis();
+    if (safeZoneConfigValid && now - lastSafeZoneRefreshMs >= SAFE_ZONE_MAX_AGE_MS) {
+        safeZoneConfigValid = false;
+        Serial.println("[Zone] Cached safe-zone configuration expired; geofence alerts are disabled.");
+    }
+    if (lastSafeZoneFetchAttemptMs == 0 || now - lastSafeZoneFetchAttemptMs >= SAFE_ZONE_REFRESH_INTERVAL_MS) {
+        refreshSafeZoneConfig();
+    }
 }
 
 // PATCH telemetry fields directly into the Firestore pet document.
@@ -614,19 +1082,10 @@ void transmitTelemetry(const String& serialPayload) {
         return;
     }
 
-    time_t currentTime = time(nullptr);
-    if (currentTime < 1700000000) {
-        if (!clockSyncRequested) {
-            configTime(0, 0, "pool.ntp.org", "time.google.com");
-            clockSyncRequested = true;
-            Serial.println("[WiFi] Waiting for network time before HTTPS verification.");
-        }
-        return;
-    }
+    if (!ensureNetworkTime()) return;
 
     // Ensure we have a valid Firebase ID token
     if (!ensureValidToken()) {
-        Serial.println("[Auth] No valid Firebase token; skipping telemetry upload.");
         return;
     }
 
@@ -646,22 +1105,32 @@ void transmitTelemetry(const String& serialPayload) {
         + "&updateMask.fieldPaths=speed"
         + "&updateMask.fieldPaths=collarBattery"
         + "&updateMask.fieldPaths=hasFix";
-    if (hasGpsFix) {
+    const bool includeGpsCoordinates = hasRealGpsFix();
+    const String gpsTimestamp = includeGpsCoordinates ? currentGpsTimestamp() : String();
+    Serial.printf("[HTTPS] telemetry request coordinatesIncluded=%s, fix=%s, satellites=%d%s\n",
+        includeGpsCoordinates ? "true" : "false",
+        includeGpsCoordinates ? "true" : "false", satellitesCount,
+        simulationMode ? " (simulation excluded)" : "");
+
+    if (includeGpsCoordinates) {
         patchUrl += "&updateMask.fieldPaths=lat"
                     "&updateMask.fieldPaths=lng"
                     "&updateMask.fieldPaths=distanceToBoundary"
                     "&updateMask.fieldPaths=motionLevel"
                     "&updateMask.fieldPaths=activity"
                     "&updateMask.fieldPaths=satellites";
+        if (gpsTimestamp.length() > 0) {
+            patchUrl += "&updateMask.fieldPaths=gpsTimestamp";
+        }
     }
 
-    WiFiClientSecure secureClient;
+    DiagnosticWiFiClientSecure secureClient;
     secureClient.setCACert(FIREBASE_ROOT_CA);
 
     HTTPClient request;
     request.setTimeout(8000);
     if (!request.begin(secureClient, patchUrl)) {
-        Serial.println("[HTTPS] Failed to initialize Firestore PATCH request.");
+        Serial.println("[HTTPS] Failed to initialize Firestore PATCH request; no connection was attempted.");
         return;
     }
 
@@ -671,15 +1140,20 @@ void transmitTelemetry(const String& serialPayload) {
 
     String firestoreBody = buildFirestorePatchBody();
     // Use PATCH via sendRequest since HTTPClient::PATCH is not always available
+    printSystemTime("Before Firestore HTTPS");
     int responseCode = request.sendRequest("PATCH", firestoreBody);
+    logHttpsOutcome("Firestore telemetry", responseCode, secureClient);
+    Serial.printf("[HTTPS] Firestore HTTP response: %d\n", responseCode);
 
     if (responseCode >= 200 && responseCode < 300) {
         Serial.printf("[HTTPS] Firestore telemetry accepted (%d).\n", responseCode);
     } else {
-        Serial.printf("[HTTPS] Firestore telemetry failed (%d): %s\n",
-            responseCode,
-            responseCode > 0 ? request.getString().c_str()
-                              : request.errorToString(responseCode).c_str());
+        if (responseCode > 0) {
+            Serial.printf("[HTTPS] Firestore response body: %s\n", request.getString().c_str());
+        } else {
+            Serial.printf("[HTTPS] Firestore transport error: %s\n",
+                request.errorToString(responseCode).c_str());
+        }
         // If 401/403, force token re-bootstrap on next cycle
         if (responseCode == 401 || responseCode == 403) {
             tokenBootstrapped = false;
@@ -706,9 +1180,7 @@ void setup() {
     initSensors();
     startWifi();
 
-    Serial.printf("[CONFIG] Safe zone \"%s\": center %.14f, %.14f; radius %.1f m; warning %.1f m\n",
-        safeZoneName.c_str(), safeZoneLat, safeZoneLng,
-        safeZoneRadiusMeters, safeZoneWarningMeters);
+    Serial.println("[CONFIG] Waiting for assigned safe-zone configuration from Firestore; geofence alerts are disabled until loaded.");
     Serial.println("[SERIAL] Send one JSON command per line at 115200 baud.");
 
     // Power-on self test: flash all LEDs in sequence
@@ -741,7 +1213,8 @@ void loop() {
     // 3. Update GPS coordinates & fix state
     if (simulationMode) {
         hasGpsFix = true;
-    } else if (gps.location.isValid() && gps.location.age() < 2000) {
+    } else if (gps.location.isValid() && gps.location.age() < 2000 &&
+        isValidCoordinate(gps.location.lat(), gps.location.lng())) {
         hasGpsFix = true;
         currentLat = gps.location.lat();
         currentLng = gps.location.lng();
@@ -758,6 +1231,10 @@ void loop() {
     // 4. Update Battery Level
     batteryPercent = readBatteryPercentage();
 
+    // Load the dashboard-assigned zone periodically. If reads fail or the
+    // cached configuration expires, geofence decisions and alarms stay off.
+    maintainSafeZoneConfig();
+
     // 5. Run Geofence & Risk Decision Engine
     updateRiskEngine();
 
@@ -769,6 +1246,9 @@ void loop() {
         lastTelemetryMs = now;
         // Print compact JSON to Serial monitor (unchanged format)
         String serialPayload = buildTelemetryPayload();
+        Serial.printf("[GPS] fix=%s satellites=%d coordinatesIncluded=%s\n",
+            hasRealGpsFix() ? "true" : "false", satellitesCount,
+            hasRealGpsFix() ? "true" : "false");
         Serial.println(serialPayload);
         maintainWifi();
         // Upload to Firestore via REST API (no Cloud Functions required)

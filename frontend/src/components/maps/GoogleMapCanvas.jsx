@@ -1,16 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
-import {
-  Crosshair,
-  Plus,
-  Minus,
-  AlertCircle,
-  Loader2,
-} from 'lucide-react';
+import { useState, useEffect, useRef } from "react";
+import { Crosshair, Plus, Minus, AlertCircle, Loader2 } from "lucide-react";
 import {
   loadGoogleMaps,
   GEOFENCE_MAP_STYLE,
   createCustomOverlay,
-} from '../../utils/googleMapsLoader';
+} from "../../utils/googleMapsLoader";
 import {
   usePersistedMapType,
   getLastMapCenter,
@@ -19,8 +13,9 @@ import {
   setLastMapZoom,
   DEFAULT_MAP_CENTER,
   DEFAULT_MAP_ZOOM,
-} from '../../utils/mapPreferences';
-import { useUserLocation } from '../../hooks/useUserLocation';
+} from "../../utils/mapPreferences";
+import { useUserLocation } from "../../hooks/useUserLocation";
+import { getPetLocationState } from "../../utils/petLocation";
 
 export default function GoogleMapCanvas({
   center,
@@ -33,9 +28,9 @@ export default function GoogleMapCanvas({
   onEditZone,
   onDeleteZone,
   onRecenter,
-  className = 'h-full w-full',
+  className = "h-full w-full",
   showControls = true,
-  controlsPosition = 'default',
+  controlsPosition = "default",
 }) {
   const mapDivRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -62,16 +57,20 @@ export default function GoogleMapCanvas({
   const [mapMode, setMapMode] = usePersistedMapType();
 
   // User Geolocation (for distinct RED marker & crosshair centering)
-  const { userLocation, isLocating, requestCurrentLocation } = useUserLocation();
+  const { userLocation, isLocating, requestCurrentLocation } =
+    useUserLocation();
 
   // Determine initial center and zoom
-  const initialCenter = center?.lat && center?.lng
-    ? { lat: Number(center.lat), lng: Number(center.lng) }
-    : selectedPet?.lat && selectedPet?.lng
-    ? { lat: Number(selectedPet.lat), lng: Number(selectedPet.lng) }
-    : getLastMapCenter();
+  const initialCenter =
+    Number.isFinite(Number(center?.lat)) && Number.isFinite(Number(center?.lng))
+      ? { lat: Number(center.lat), lng: Number(center.lng) }
+      : selectedPet?.hasFix === true &&
+          Number.isFinite(selectedPet.lat) &&
+          Number.isFinite(selectedPet.lng)
+        ? { lat: Number(selectedPet.lat), lng: Number(selectedPet.lng) }
+        : getLastMapCenter();
 
-  const initialZoom = typeof zoom === 'number' ? zoom : getLastMapZoom();
+  const initialZoom = typeof zoom === "number" ? zoom : getLastMapZoom();
 
   // 1. Initialize Google Map Canvas once
   useEffect(() => {
@@ -82,22 +81,22 @@ export default function GoogleMapCanvas({
         if (!isMounted || !mapDivRef.current) return;
         googleMapsRef.current = maps;
 
-        const currentMapType = mapMode === 'Satellite' ? 'hybrid' : 'roadmap';
+        const currentMapType = mapMode === "Satellite" ? "hybrid" : "roadmap";
 
         const map = new maps.Map(mapDivRef.current, {
           center: initialCenter,
           zoom: initialZoom,
           disableDefaultUI: true,
-          styles: currentMapType === 'roadmap' ? GEOFENCE_MAP_STYLE : [],
+          styles: currentMapType === "roadmap" ? GEOFENCE_MAP_STYLE : [],
           mapTypeId: currentMapType,
-          gestureHandling: 'greedy',
+          gestureHandling: "greedy",
           clickableIcons: false,
         });
 
         mapInstanceRef.current = map;
 
         // Track user drag/zoom to persist camera location across tabs smoothly
-        map.addListener('idle', () => {
+        map.addListener("idle", () => {
           const c = map.getCenter();
           if (c) {
             setLastMapCenter({ lat: c.lat(), lng: c.lng() });
@@ -110,8 +109,8 @@ export default function GoogleMapCanvas({
       })
       .catch((err) => {
         if (!isMounted) return;
-        console.error('Google Maps Load Error:', err);
-        setError(err.message || 'Failed to load Google Maps JavaScript API.');
+        console.error("Google Maps Load Error:", err);
+        setError(err.message || "Failed to load Google Maps JavaScript API.");
         setLoading(false);
       });
 
@@ -149,7 +148,7 @@ export default function GoogleMapCanvas({
       interactiveLayersRef.current.radiusOverlay.setMap(null);
     }
     interactiveLayersRef.current.vertexMarkers.forEach(
-      (m) => m.setMap && m.setMap(null)
+      (m) => m.setMap && m.setMap(null),
     );
     interactiveLayersRef.current = {
       circle: null,
@@ -165,17 +164,23 @@ export default function GoogleMapCanvas({
     if (!mapReady || !mapInstanceRef.current) return;
     const map = mapInstanceRef.current;
 
-    if (mapMode === 'Satellite') {
-      map.setMapTypeId('hybrid');
+    if (mapMode === "Satellite") {
+      map.setMapTypeId("hybrid");
     } else {
-      map.setMapTypeId('roadmap');
+      map.setMapTypeId("roadmap");
       map.setOptions({ styles: GEOFENCE_MAP_STYLE });
     }
   }, [mapReady, mapMode]);
 
   // 3. Smooth Pan when Center Prop Changes
   useEffect(() => {
-    if (!mapReady || !mapInstanceRef.current || !center?.lat || !center?.lng) return;
+    if (
+      !mapReady ||
+      !mapInstanceRef.current ||
+      !Number.isFinite(Number(center?.lat)) ||
+      !Number.isFinite(Number(center?.lng))
+    )
+      return;
     mapInstanceRef.current.panTo({
       lat: Number(center.lat),
       lng: Number(center.lng),
@@ -194,25 +199,38 @@ export default function GoogleMapCanvas({
 
     // Filter out the zone currently being edited so the draft layer takes precedence without double rendering
     const zonesToRender = safeZones.filter((z) => {
-      if (interactiveZone?.editingZoneId && z.id === interactiveZone.editingZoneId) {
+      if (
+        interactiveZone?.editingZoneId &&
+        z.id === interactiveZone.editingZoneId
+      ) {
         return false;
       }
       return true;
     });
 
     zonesToRender.forEach((zone) => {
-      const color = zone.borderColor || zone.badgeColor || (zone.status === 'Restricted' ? '#D32F2F' : '#005A36');
-      const isDanger = zone.status === 'Restricted' || zone.badgeColor === '#D32F2F' || color === '#D32F2F';
+      const color =
+        zone.borderColor ||
+        zone.badgeColor ||
+        (zone.status === "Restricted" ? "#D32F2F" : "#005A36");
+      const isDanger =
+        zone.status === "Restricted" ||
+        zone.badgeColor === "#D32F2F" ||
+        color === "#D32F2F";
 
       let shapeLayer = null;
       let labelLat = null;
       let labelLng = null;
 
-      if (zone.shape === 'Polygon' && Array.isArray(zone.polygonPoints) && zone.polygonPoints.length >= 3) {
+      if (
+        zone.shape === "Polygon" &&
+        Array.isArray(zone.polygonPoints) &&
+        zone.polygonPoints.length >= 3
+      ) {
         const paths = zone.polygonPoints
           .map((p) => ({
-            lat: typeof p.lat === 'number' ? p.lat : parseFloat(p.lat),
-            lng: typeof p.lng === 'number' ? p.lng : parseFloat(p.lng),
+            lat: typeof p.lat === "number" ? p.lat : parseFloat(p.lat),
+            lng: typeof p.lng === "number" ? p.lng : parseFloat(p.lng),
           }))
           .filter((p) => !isNaN(p.lat) && !isNaN(p.lng));
 
@@ -233,14 +251,20 @@ export default function GoogleMapCanvas({
           labelLng = paths.reduce((sum, p) => sum + p.lng, 0) / paths.length;
         }
       } else if (zone.center) {
-        const centerLat = typeof zone.center.lat === 'number' ? zone.center.lat : parseFloat(zone.center.lat);
-        const centerLng = typeof zone.center.lng === 'number' ? zone.center.lng : parseFloat(zone.center.lng);
+        const centerLat =
+          typeof zone.center.lat === "number"
+            ? zone.center.lat
+            : parseFloat(zone.center.lat);
+        const centerLng =
+          typeof zone.center.lng === "number"
+            ? zone.center.lng
+            : parseFloat(zone.center.lng);
         const radiusMeters =
-          typeof zone.radiusMeters === 'number'
+          typeof zone.radiusMeters === "number"
             ? zone.radiusMeters
-            : typeof zone.radius === 'number'
-            ? zone.radius
-            : parseFloat(zone.radius) || 100;
+            : typeof zone.radius === "number"
+              ? zone.radius
+              : parseFloat(zone.radius) || 100;
 
         if (!isNaN(centerLat) && !isNaN(centerLng)) {
           shapeLayer = new maps.Circle({
@@ -266,25 +290,25 @@ export default function GoogleMapCanvas({
 
         // Add HTML Zone Badge Label with optional Edit / Delete buttons
         if (labelLat !== null && labelLng !== null) {
-          const badgeElem = document.createElement('div');
+          const badgeElem = document.createElement("div");
           badgeElem.className =
-            'flex items-center gap-1.5 select-none pointer-events-auto -translate-x-1/2 -translate-y-1/2';
+            "flex items-center gap-1.5 select-none pointer-events-auto -translate-x-1/2 -translate-y-1/2";
 
-          const titleSpan = document.createElement('span');
+          const titleSpan = document.createElement("span");
           titleSpan.className =
-            'rounded-md px-2.5 py-0.5 text-[11px] font-bold text-white shadow-sm whitespace-nowrap';
+            "rounded-md px-2.5 py-0.5 text-[11px] font-bold text-white shadow-sm whitespace-nowrap";
           titleSpan.style.backgroundColor = zone.badgeColor || color;
           titleSpan.textContent = zone.name;
           badgeElem.appendChild(titleSpan);
 
           if ((onEditZone || onDeleteZone) && !interactiveZone) {
-            const btnGroup = document.createElement('div');
-            btnGroup.className = 'flex items-center gap-1';
+            const btnGroup = document.createElement("div");
+            btnGroup.className = "flex items-center gap-1";
 
             if (onEditZone) {
-              const editBtn = document.createElement('button');
+              const editBtn = document.createElement("button");
               editBtn.className =
-                'flex h-5 w-5 items-center justify-center rounded bg-white text-gray-700 shadow-xs hover:bg-gray-100 hover:text-gray-900 border border-gray-200 cursor-pointer';
+                "flex h-5 w-5 items-center justify-center rounded bg-white text-gray-700 shadow-xs hover:bg-gray-100 hover:text-gray-900 border border-gray-200 cursor-pointer";
               editBtn.innerHTML =
                 '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
               editBtn.title = `Edit ${zone.name}`;
@@ -296,9 +320,9 @@ export default function GoogleMapCanvas({
             }
 
             if (onDeleteZone) {
-              const delBtn = document.createElement('button');
+              const delBtn = document.createElement("button");
               delBtn.className =
-                'flex h-5 w-5 items-center justify-center rounded bg-white text-rose-500 shadow-xs hover:bg-rose-50 hover:text-rose-600 border border-gray-200 cursor-pointer';
+                "flex h-5 w-5 items-center justify-center rounded bg-white text-rose-500 shadow-xs hover:bg-rose-50 hover:text-rose-600 border border-gray-200 cursor-pointer";
               delBtn.innerHTML =
                 '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>';
               delBtn.title = `Delete ${zone.name}`;
@@ -316,7 +340,7 @@ export default function GoogleMapCanvas({
             maps,
             { lat: labelLat, lng: labelLng },
             badgeElem,
-            { zIndex: '500' }
+            { zIndex: "500" },
           );
           overlay.setMap(map);
           zoneLayersRef.current.push(overlay);
@@ -339,23 +363,33 @@ export default function GoogleMapCanvas({
     const allPets = pets.length > 0 ? pets : selectedPet ? [selectedPet] : [];
 
     allPets.forEach((pet) => {
-      const petLat = typeof pet.lat === 'number' ? pet.lat : parseFloat(pet.lat);
-      const petLng = typeof pet.lng === 'number' ? pet.lng : parseFloat(pet.lng);
-      if (isNaN(petLat) || isNaN(petLng)) return;
+      const locationState = getPetLocationState(pet);
+      if (!locationState.coordinates) return;
+      const { lat: petLat, lng: petLng } = locationState.coordinates;
+      const isStale = locationState.status === "stale";
 
       const isSelected = selectedPet?.id === pet.id;
-      const isCaution = pet.status?.toLowerCase() === 'caution';
-      const statusColor = isCaution ? '#E68A00' : '#005A36';
-      const petInitial = pet.initial || pet.name?.charAt(0) || 'P';
+      const isCaution = pet.status?.toLowerCase() === "caution";
+      const statusColor = isStale
+        ? "#6B7280"
+        : isCaution
+          ? "#E68A00"
+          : "#005A36";
+      const petInitial = pet.initial || pet.name?.charAt(0) || "P";
 
-      const petElem = document.createElement('div');
+      const petElem = document.createElement("div");
       petElem.className =
-        'relative flex flex-col items-center select-none cursor-pointer transition-transform duration-200 -translate-x-1/2 -translate-y-full';
+        "relative flex flex-col items-center select-none cursor-pointer transition-transform duration-200 -translate-x-1/2 -translate-y-full";
 
       if (isSelected) {
-        petElem.classList.add('z-50', 'scale-105');
+        petElem.classList.add("z-50", "scale-105");
       } else {
-        petElem.classList.add('z-30', 'opacity-90', 'hover:opacity-100', 'hover:scale-105');
+        petElem.classList.add(
+          "z-30",
+          "opacity-90",
+          "hover:opacity-100",
+          "hover:scale-105",
+        );
       }
 
       petElem.innerHTML = `
@@ -366,20 +400,22 @@ export default function GoogleMapCanvas({
             <span>${pet.name}</span>
           </div>
           ${
-            isSelected
-              ? `<span class="text-[9px] font-bold leading-tight" style="color: ${statusColor};">${pet.status || 'Safe'}</span>`
-              : ''
+            isStale
+              ? `<span class="text-[9px] font-bold leading-tight" style="color: ${statusColor};">STALE LOCATION</span>`
+              : isSelected
+                ? `<span class="text-[9px] font-bold leading-tight" style="color: ${statusColor};">${pet.status || "Safe"}</span>`
+                : ""
           }
         </div>
 
         <!-- Pulse & Avatar Marker -->
         <div class="relative flex items-center justify-center">
           ${
-            isSelected
+            isSelected && !isStale
               ? `<span class="absolute inline-flex h-12 w-12 rounded-full opacity-40 animate-ping" style="background-color: ${statusColor};"></span>`
-              : ''
+              : ""
           }
-          <div class="flex h-9 w-9 items-center justify-center rounded-full text-white font-bold text-sm shadow-md ring-3 ring-white/95" style="background-color: ${statusColor};">
+          <div class="flex h-9 w-9 items-center justify-center rounded-full text-white font-bold text-sm shadow-md ring-3 ring-white/95 ${isStale ? "opacity-60" : ""}" style="background-color: ${statusColor};">
             ${petInitial}
           </div>
         </div>
@@ -394,7 +430,7 @@ export default function GoogleMapCanvas({
         maps,
         { lat: petLat, lng: petLng },
         petElem,
-        { zIndex: isSelected ? '1000' : '900' }
+        { zIndex: isSelected ? "1000" : "900" },
       );
       overlay.setMap(map);
       petOverlaysRef.current.push(overlay);
@@ -413,13 +449,19 @@ export default function GoogleMapCanvas({
     }
 
     if (!userLocation?.lat || !userLocation?.lng) return;
-    const userLat = typeof userLocation.lat === 'number' ? userLocation.lat : parseFloat(userLocation.lat);
-    const userLng = typeof userLocation.lng === 'number' ? userLocation.lng : parseFloat(userLocation.lng);
+    const userLat =
+      typeof userLocation.lat === "number"
+        ? userLocation.lat
+        : parseFloat(userLocation.lat);
+    const userLng =
+      typeof userLocation.lng === "number"
+        ? userLocation.lng
+        : parseFloat(userLocation.lng);
     if (isNaN(userLat) || isNaN(userLng)) return;
 
-    const userElem = document.createElement('div');
+    const userElem = document.createElement("div");
     userElem.className =
-      'relative flex flex-col items-center select-none pointer-events-none -translate-x-1/2 -translate-y-1/2 z-40';
+      "relative flex flex-col items-center select-none pointer-events-none -translate-x-1/2 -translate-y-1/2 z-40";
 
     userElem.innerHTML = `
       <!-- Tooltip -->
@@ -446,7 +488,7 @@ export default function GoogleMapCanvas({
       maps,
       { lat: userLat, lng: userLng },
       userElem,
-      { zIndex: '950' }
+      { zIndex: "950" },
     );
     overlay.setMap(map);
     userOverlayRef.current = overlay;
@@ -454,7 +496,12 @@ export default function GoogleMapCanvas({
 
   // 7. Interactive Zone Mode (Add / Edit Safe Zone with Native Circle Dragging)
   useEffect(() => {
-    if (!mapReady || !mapInstanceRef.current || !googleMapsRef.current || !interactiveZone) {
+    if (
+      !mapReady ||
+      !mapInstanceRef.current ||
+      !googleMapsRef.current ||
+      !interactiveZone
+    ) {
       cleanupInteractiveLayers();
       return;
     }
@@ -462,10 +509,10 @@ export default function GoogleMapCanvas({
     const map = mapInstanceRef.current;
     const maps = googleMapsRef.current;
     const {
-      mode = 'Circle',
+      mode = "Circle",
       center: zoneCenter,
       radius: zoneRadius = 50,
-      zoneName = 'Home',
+      zoneName = "Home",
       onCenterChange,
       polygonPoints = [],
       onPolygonPointsChange,
@@ -474,16 +521,17 @@ export default function GoogleMapCanvas({
     cleanupInteractiveLayers();
 
     // Map click repositions center directly
-    const mapClickListener = map.addListener('click', (e) => {
+    const mapClickListener = map.addListener("click", (e) => {
       if (onCenterChange) {
         onCenterChange({ lat: e.latLng.lat(), lng: e.latLng.lng() });
       }
     });
 
-    if (mode === 'Circle') {
-      const targetCenter = zoneCenter?.lat && zoneCenter?.lng
-        ? { lat: Number(zoneCenter.lat), lng: Number(zoneCenter.lng) }
-        : DEFAULT_MAP_CENTER;
+    if (mode === "Circle") {
+      const targetCenter =
+        zoneCenter?.lat && zoneCenter?.lng
+          ? { lat: Number(zoneCenter.lat), lng: Number(zoneCenter.lng) }
+          : DEFAULT_MAP_CENTER;
 
       const numRadius = Number(zoneRadius) || 50;
 
@@ -491,10 +539,10 @@ export default function GoogleMapCanvas({
       const circle = new maps.Circle({
         center: targetCenter,
         radius: numRadius,
-        strokeColor: '#005A36',
+        strokeColor: "#005A36",
         strokeOpacity: 0.95,
         strokeWeight: 3,
-        fillColor: '#005A36',
+        fillColor: "#005A36",
         fillOpacity: 0.2,
         map,
         draggable: true, // Native Google Maps drag handler
@@ -504,9 +552,9 @@ export default function GoogleMapCanvas({
       interactiveLayersRef.current.circle = circle;
 
       // 2. Center Pin Overlay
-      const centerElem = document.createElement('div');
+      const centerElem = document.createElement("div");
       centerElem.className =
-        'relative flex flex-col items-center select-none pointer-events-none -translate-x-1/2 -translate-y-1/2';
+        "relative flex flex-col items-center select-none pointer-events-none -translate-x-1/2 -translate-y-1/2";
 
       centerElem.innerHTML = `
         <div class="flex h-8 w-8 items-center justify-center rounded-full bg-[#005A36] text-white shadow-md ring-2 ring-white">
@@ -517,13 +565,18 @@ export default function GoogleMapCanvas({
         </div>
         <div class="mt-1 flex items-center gap-1 rounded-md bg-white px-2.5 py-0.5 text-[11px] font-bold text-gray-900 shadow-md border border-gray-100 whitespace-nowrap">
           <span style="color: #005A36;">📍</span>
-          <span>${zoneName || 'Home'}</span>
+          <span>${zoneName || "Home"}</span>
         </div>
       `;
 
-      const centerOverlay = createCustomOverlay(maps, targetCenter, centerElem, {
-        zIndex: '1000',
-      });
+      const centerOverlay = createCustomOverlay(
+        maps,
+        targetCenter,
+        centerElem,
+        {
+          zIndex: "1000",
+        },
+      );
       centerOverlay.setMap(map);
       interactiveLayersRef.current.centerOverlay = centerOverlay;
 
@@ -531,22 +584,22 @@ export default function GoogleMapCanvas({
       const latOffset = (numRadius / 6378137) * (180 / Math.PI);
       const topLat = targetCenter.lat + latOffset;
 
-      const radiusElem = document.createElement('div');
+      const radiusElem = document.createElement("div");
       radiusElem.className =
-        'rounded-md bg-white px-2.5 py-0.5 text-[11px] font-bold text-gray-800 shadow-sm border border-gray-100 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap pointer-events-none';
+        "rounded-md bg-white px-2.5 py-0.5 text-[11px] font-bold text-gray-800 shadow-sm border border-gray-100 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap pointer-events-none";
       radiusElem.textContent = `${numRadius} m`;
 
       const radiusOverlay = createCustomOverlay(
         maps,
         { lat: topLat, lng: targetCenter.lng },
         radiusElem,
-        { zIndex: '800' }
+        { zIndex: "800" },
       );
       radiusOverlay.setMap(map);
       interactiveLayersRef.current.radiusOverlay = radiusOverlay;
 
       // When circle is dragged, synchronize center & radius overlays live
-      const dragListener = circle.addListener('drag', () => {
+      const dragListener = circle.addListener("drag", () => {
         const newPos = circle.getCenter();
         if (newPos) {
           const lat = newPos.lat();
@@ -557,7 +610,7 @@ export default function GoogleMapCanvas({
         }
       });
 
-      const dragEndListener = circle.addListener('dragend', () => {
+      const dragEndListener = circle.addListener("dragend", () => {
         const newPos = circle.getCenter();
         if (newPos && onCenterChange) {
           onCenterChange({ lat: newPos.lat(), lng: newPos.lng() });
@@ -569,7 +622,7 @@ export default function GoogleMapCanvas({
         if (dragListener?.remove) dragListener.remove();
         if (dragEndListener?.remove) dragEndListener.remove();
       };
-    } else if (mode === 'Polygon' && polygonPoints.length) {
+    } else if (mode === "Polygon" && polygonPoints.length) {
       // Polygon Mode
       const paths = polygonPoints.map((p) => ({
         lat: Number(p.lat),
@@ -578,10 +631,10 @@ export default function GoogleMapCanvas({
 
       const polygon = new maps.Polygon({
         paths,
-        strokeColor: '#005A36',
+        strokeColor: "#005A36",
         strokeOpacity: 0.95,
         strokeWeight: 3,
-        fillColor: '#005A36',
+        fillColor: "#005A36",
         fillOpacity: 0.2,
         map,
         clickable: false,
@@ -598,22 +651,24 @@ export default function GoogleMapCanvas({
           icon: {
             path: maps.SymbolPath.CIRCLE,
             scale: 7,
-            fillColor: '#005A36',
+            fillColor: "#005A36",
             fillOpacity: 1,
-            strokeColor: '#FFFFFF',
+            strokeColor: "#FFFFFF",
             strokeWeight: 2.5,
           },
           zIndex: 200,
         });
 
-        marker.addListener('drag', (e) => {
+        marker.addListener("drag", (e) => {
           const newPt = { lat: e.latLng.lat(), lng: e.latLng.lng() };
           const newPoints = [...polygonPoints];
           newPoints[idx] = newPt;
-          polygon.setPaths(newPoints.map((p) => ({ lat: Number(p.lat), lng: Number(p.lng) })));
+          polygon.setPaths(
+            newPoints.map((p) => ({ lat: Number(p.lat), lng: Number(p.lng) })),
+          );
         });
 
-        marker.addListener('dragend', (e) => {
+        marker.addListener("dragend", (e) => {
           const newPt = { lat: e.latLng.lat(), lng: e.latLng.lng() };
           if (onPolygonPointsChange) {
             onPolygonPointsChange((prev) => {
@@ -669,7 +724,7 @@ export default function GoogleMapCanvas({
       }
       if (onRecenter) onRecenter();
     } catch (err) {
-      const msg = err.message || 'Location permission denied in browser.';
+      const msg = err.message || "Location permission denied in browser.";
       setLocationToast(msg);
       setTimeout(() => setLocationToast(null), 3500);
     }
@@ -699,12 +754,12 @@ export default function GoogleMapCanvas({
             <AlertCircle className="h-6 w-6" />
           </div>
           <h3 className="text-base font-bold text-gray-900">
-            {error.toLowerCase().includes('missing')
-              ? 'Google Maps API Key Required'
-              : 'Google Maps Error'}
+            {error.toLowerCase().includes("missing")
+              ? "Google Maps API Key Required"
+              : "Google Maps Error"}
           </h3>
           <p className="text-xs text-gray-600 mt-1 max-w-sm">{error}</p>
-          {error.toLowerCase().includes('missing') && (
+          {error.toLowerCase().includes("missing") && (
             <div className="mt-4 rounded-xl bg-gray-100 px-3.5 py-2 text-[11px] font-mono text-gray-700">
               VITE_GOOGLE_MAPS_API_KEY=your_key_here
             </div>
@@ -718,9 +773,9 @@ export default function GoogleMapCanvas({
           <div className="flex items-center gap-1.5 rounded-full bg-white/95 backdrop-blur-xs px-4 py-1.5 text-xs font-semibold text-gray-800 shadow-md border border-gray-200/90 whitespace-nowrap">
             <span className="h-2 w-2 rounded-full bg-[#005A36] animate-pulse" />
             <span>
-              {interactiveZone.mode === 'Circle'
-                ? 'Drag circle or click map to move zone'
-                : 'Drag handles to reshape boundary'}
+              {interactiveZone.mode === "Circle"
+                ? "Drag circle or click map to move zone"
+                : "Drag handles to reshape boundary"}
             </span>
           </div>
         </div>
@@ -738,28 +793,28 @@ export default function GoogleMapCanvas({
       {showControls && !loading && !error && (
         <div
           className={`absolute z-20 ${
-            controlsPosition === 'top-left' ? 'top-4 left-4' : 'bottom-4 left-4'
+            controlsPosition === "top-left" ? "top-4 left-4" : "bottom-4 left-4"
           }`}
         >
           <div className="flex items-center rounded-lg bg-white/95 backdrop-blur-xs p-0.5 shadow-md border border-gray-200 text-xs font-medium text-gray-700">
             <button
               type="button"
-              onClick={() => setMapMode('Map')}
+              onClick={() => setMapMode("Map")}
               className={`rounded-md px-2.5 py-1 transition-colors cursor-pointer ${
-                mapMode === 'Map'
-                  ? 'bg-gray-100 text-gray-900 font-semibold'
-                  : 'text-gray-500 hover:text-gray-900'
+                mapMode === "Map"
+                  ? "bg-gray-100 text-gray-900 font-semibold"
+                  : "text-gray-500 hover:text-gray-900"
               }`}
             >
               Map
             </button>
             <button
               type="button"
-              onClick={() => setMapMode('Satellite')}
+              onClick={() => setMapMode("Satellite")}
               className={`rounded-md px-2.5 py-1 transition-colors cursor-pointer ${
-                mapMode === 'Satellite'
-                  ? 'bg-gray-100 text-gray-900 font-semibold'
-                  : 'text-gray-500 hover:text-gray-900'
+                mapMode === "Satellite"
+                  ? "bg-gray-100 text-gray-900 font-semibold"
+                  : "text-gray-500 hover:text-gray-900"
               }`}
             >
               Satellite

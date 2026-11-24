@@ -7,8 +7,8 @@ import {
   deleteDoc,
   onSnapshot,
   serverTimestamp,
-} from 'firebase/firestore';
-import { db } from '../../firebase';
+} from "firebase/firestore";
+import { db } from "../../firebase";
 
 /**
  * Remove undefined values as Firestore throws error on undefined fields.
@@ -29,42 +29,50 @@ function sanitizeZoneData(data) {
 function normalizeZoneDoc(docSnap) {
   const data = docSnap.data();
 
-  // Extract center coordinates
-  const lat = typeof data.lat === 'number'
-    ? data.lat
-    : (typeof data.center?.lat === 'number' ? data.center.lat : 18.6445);
-  const lng = typeof data.lng === 'number'
-    ? data.lng
-    : (typeof data.center?.lng === 'number' ? data.center.lng : 73.7550);
+  const rawLat = typeof data.lat === "number" ? data.lat : data.center?.lat;
+  const rawLng = typeof data.lng === "number" ? data.lng : data.center?.lng;
+  const lat =
+    Number.isFinite(rawLat) && rawLat >= -90 && rawLat <= 90 ? rawLat : null;
+  const lng =
+    Number.isFinite(rawLng) && rawLng >= -180 && rawLng <= 180 ? rawLng : null;
 
-  const radiusNum = typeof data.radiusMeters === 'number'
-    ? data.radiusMeters
-    : (parseInt(data.radius, 10) || 50);
+  const radiusNum =
+    typeof data.radiusMeters === "number"
+      ? data.radiusMeters
+      : parseInt(data.radius, 10) || null;
 
   return {
     id: docSnap.id,
-    name: data.name || 'Safe Zone',
-    shape: data.shape || (Array.isArray(data.polygonPoints) && data.polygonPoints.length >= 3 ? 'Polygon' : 'Circle'),
-    type: data.type || 'Safe Zone',
+    name: data.name || "Safe Zone",
+    shape:
+      data.shape ||
+      (Array.isArray(data.polygonPoints) && data.polygonPoints.length >= 3
+        ? "Polygon"
+        : "Circle"),
+    type: data.type || "Safe Zone",
     lat,
     lng,
     center: { lat, lng },
-    radius: data.radius || `${radiusNum} m`,
+    radius: data.radius || (radiusNum !== null ? `${radiusNum} m` : null),
     radiusMeters: radiusNum,
-    polygonPoints: Array.isArray(data.polygonPoints) && data.polygonPoints.length > 0
-      ? data.polygonPoints.map((pt) => ({ lat: Number(pt.lat), lng: Number(pt.lng) }))
-      : null,
-    warningDistance: data.warningDistance || '15 m',
+    polygonPoints:
+      Array.isArray(data.polygonPoints) && data.polygonPoints.length > 0
+        ? data.polygonPoints.map((pt) => ({
+            lat: Number(pt.lat),
+            lng: Number(pt.lng),
+          }))
+        : null,
+    warningDistance: data.warningDistance ?? null,
     assignedPets: Array.isArray(data.assignedPets) ? data.assignedPets : [],
     alertBehavior: {
       approachesBoundary: data.alertBehavior?.approachesBoundary ?? true,
       leavesSafeZone: data.alertBehavior?.leavesSafeZone ?? true,
     },
-    badgeColor: data.badgeColor || '#005A36',
-    borderColor: data.borderColor || '#005A36',
-    bgColor: data.bgColor || 'rgba(0, 90, 54, 0.14)',
-    borderStyle: data.borderStyle || 'dashed',
-    status: data.status || 'Active',
+    badgeColor: data.badgeColor || "#005A36",
+    borderColor: data.borderColor || "#005A36",
+    bgColor: data.bgColor || "rgba(0, 90, 54, 0.14)",
+    borderStyle: data.borderStyle || "dashed",
+    status: data.status || "Active",
     createdAt: data.createdAt || null,
     updatedAt: data.updatedAt || null,
   };
@@ -79,18 +87,22 @@ export function subscribeSafeZones(uid, onData, onError) {
     return () => {};
   }
 
-  const zonesCollectionRef = collection(db, 'users', uid, 'safeZones');
-  console.log(`[Firestore] Subscribing to safeZones listener for UID: ${uid} at path: users/${uid}/safeZones`);
+  const zonesCollectionRef = collection(db, "users", uid, "safeZones");
+  console.log(
+    `[Firestore] Subscribing to safeZones listener for UID: ${uid} at path: users/${uid}/safeZones`,
+  );
 
   const unsubscribe = onSnapshot(
     zonesCollectionRef,
     (snapshot) => {
       const zones = snapshot.docs.map(normalizeZoneDoc);
-      console.log(`[Firestore] Real-time snapshot received: ${zones.length} safe zones loaded.`);
+      console.log(
+        `[Firestore] Real-time snapshot received: ${zones.length} safe zones loaded.`,
+      );
       onData(zones);
     },
     (error) => {
-      console.error('[Firestore] subscribeSafeZones snapshot error:', {
+      console.error("[Firestore] subscribeSafeZones snapshot error:", {
         uid,
         path: `users/${uid}/safeZones`,
         errorCode: error.code,
@@ -98,7 +110,7 @@ export function subscribeSafeZones(uid, onData, onError) {
         error,
       });
       if (onError) onError(error);
-    }
+    },
   );
 
   return unsubscribe;
@@ -109,26 +121,34 @@ export function subscribeSafeZones(uid, onData, onError) {
  */
 export async function getSafeZones(uid) {
   if (!uid) {
-    console.error('[Firestore] getSafeZones aborted: user UID missing');
-    return { success: false, error: 'User is not authenticated' };
+    console.error("[Firestore] getSafeZones aborted: user UID missing");
+    return { success: false, error: "User is not authenticated" };
   }
 
   try {
-    const zonesCollectionRef = collection(db, 'users', uid, 'safeZones');
-    console.log(`[Firestore] Fetching safe zones from path: users/${uid}/safeZones`);
+    const zonesCollectionRef = collection(db, "users", uid, "safeZones");
+    console.log(
+      `[Firestore] Fetching safe zones from path: users/${uid}/safeZones`,
+    );
     const snapshot = await getDocs(zonesCollectionRef);
     const safeZones = snapshot.docs.map(normalizeZoneDoc);
-    console.log(`[Firestore] getSafeZones SUCCESS: Fetched ${safeZones.length} safe zones.`);
+    console.log(
+      `[Firestore] getSafeZones SUCCESS: Fetched ${safeZones.length} safe zones.`,
+    );
     return { success: true, safeZones };
   } catch (error) {
-    console.error('[Firestore] getSafeZones FAILED:', {
+    console.error("[Firestore] getSafeZones FAILED:", {
       uid,
       path: `users/${uid}/safeZones`,
       errorCode: error.code,
       errorMessage: error.message,
       error,
     });
-    return { success: false, error: error.message || 'Failed to load safe zones', rawError: error };
+    return {
+      success: false,
+      error: error.message || "Failed to load safe zones",
+      rawError: error,
+    };
   }
 }
 
@@ -137,56 +157,89 @@ export async function getSafeZones(uid) {
  */
 export async function createSafeZone(uid, zoneData) {
   if (!uid) {
-    console.error('[Firestore] createSafeZone aborted: user UID missing');
-    return { success: false, error: 'User is not authenticated' };
+    console.error("[Firestore] createSafeZone aborted: user UID missing");
+    return { success: false, error: "User is not authenticated" };
   }
 
-  const zonesCollectionRef = collection(db, 'users', uid, 'safeZones');
+  const zonesCollectionRef = collection(db, "users", uid, "safeZones");
   const newDocRef = doc(zonesCollectionRef);
   const zoneId = newDocRef.id;
   const docPath = `users/${uid}/safeZones/${zoneId}`;
 
-  const lat = typeof zoneData.lat === 'number'
-    ? zoneData.lat
-    : (typeof zoneData.center?.lat === 'number' ? zoneData.center.lat : 18.6445);
-  const lng = typeof zoneData.lng === 'number'
-    ? zoneData.lng
-    : (typeof zoneData.center?.lng === 'number' ? zoneData.center.lng : 73.7550);
+  const lat =
+    typeof zoneData.lat === "number" ? zoneData.lat : zoneData.center?.lat;
+  const lng =
+    typeof zoneData.lng === "number" ? zoneData.lng : zoneData.center?.lng;
+  if (
+    !Number.isFinite(lat) ||
+    lat < -90 ||
+    lat > 90 ||
+    !Number.isFinite(lng) ||
+    lng < -180 ||
+    lng > 180
+  ) {
+    return {
+      success: false,
+      error: "Safe-zone center coordinates are required and must be valid.",
+    };
+  }
 
-  const radiusMeters = typeof zoneData.radiusMeters === 'number'
-    ? zoneData.radiusMeters
-    : (parseInt(zoneData.radius, 10) || 50);
+  const radiusMeters =
+    typeof zoneData.radiusMeters === "number"
+      ? zoneData.radiusMeters
+      : parseInt(zoneData.radius, 10) || 50;
+  const warningMeters = parseFloat(zoneData.warningDistance);
+  if (
+    !Number.isFinite(radiusMeters) ||
+    radiusMeters <= 0 ||
+    !Number.isFinite(warningMeters) ||
+    warningMeters < 0 ||
+    warningMeters >= radiusMeters
+  ) {
+    return {
+      success: false,
+      error:
+        "Safe-zone radius and warning distance must be valid; warning distance must be less than radius.",
+    };
+  }
 
-  const isPolygon = zoneData.shape === 'Polygon' || Array.isArray(zoneData.polygonPoints);
+  const isPolygon =
+    zoneData.shape === "Polygon" || Array.isArray(zoneData.polygonPoints);
 
   const payload = sanitizeZoneData({
-    name: zoneData.name?.trim() || 'Home Safe Zone',
-    shape: isPolygon ? 'Polygon' : 'Circle',
-    type: zoneData.type || 'Safe Zone',
+    name: zoneData.name?.trim() || "Home Safe Zone",
+    shape: isPolygon ? "Polygon" : "Circle",
+    type: zoneData.type || "Safe Zone",
     lat,
     lng,
     center: { lat, lng },
     radius: zoneData.radius || `${radiusMeters} m`,
     radiusMeters,
-    polygonPoints: isPolygon && Array.isArray(zoneData.polygonPoints)
-      ? zoneData.polygonPoints.map((pt) => ({ lat: Number(pt.lat), lng: Number(pt.lng) }))
-      : null,
-    warningDistance: zoneData.warningDistance || '15 m',
-    assignedPets: Array.isArray(zoneData.assignedPets) ? zoneData.assignedPets : [],
+    polygonPoints:
+      isPolygon && Array.isArray(zoneData.polygonPoints)
+        ? zoneData.polygonPoints.map((pt) => ({
+            lat: Number(pt.lat),
+            lng: Number(pt.lng),
+          }))
+        : null,
+    warningDistance: zoneData.warningDistance || "15 m",
+    assignedPets: Array.isArray(zoneData.assignedPets)
+      ? zoneData.assignedPets
+      : [],
     alertBehavior: {
       approachesBoundary: zoneData.alertBehavior?.approachesBoundary ?? true,
       leavesSafeZone: zoneData.alertBehavior?.leavesSafeZone ?? true,
     },
-    badgeColor: zoneData.badgeColor || '#005A36',
-    borderColor: zoneData.borderColor || '#005A36',
-    bgColor: zoneData.bgColor || 'rgba(0, 90, 54, 0.14)',
-    borderStyle: zoneData.borderStyle || 'dashed',
-    status: zoneData.status || 'Active',
+    badgeColor: zoneData.badgeColor || "#005A36",
+    borderColor: zoneData.borderColor || "#005A36",
+    bgColor: zoneData.bgColor || "rgba(0, 90, 54, 0.14)",
+    borderStyle: zoneData.borderStyle || "dashed",
+    status: zoneData.status || "Active",
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
 
-  console.log('[Firestore] Initiating createSafeZone write...', {
+  console.log("[Firestore] Initiating createSafeZone write...", {
     uid,
     path: docPath,
     zoneId,
@@ -195,7 +248,10 @@ export async function createSafeZone(uid, zoneData) {
 
   try {
     await setDoc(newDocRef, payload);
-    console.log(`[Firestore] createSafeZone SUCCESS! Document created at: ${docPath}`, { id: zoneId });
+    console.log(
+      `[Firestore] createSafeZone SUCCESS! Document created at: ${docPath}`,
+      { id: zoneId },
+    );
 
     return {
       success: true,
@@ -205,7 +261,7 @@ export async function createSafeZone(uid, zoneData) {
       },
     };
   } catch (error) {
-    console.error('[Firestore] createSafeZone FAILED with error:', {
+    console.error("[Firestore] createSafeZone FAILED with error:", {
       uid,
       path: docPath,
       errorCode: error.code,
@@ -214,7 +270,7 @@ export async function createSafeZone(uid, zoneData) {
     });
     return {
       success: false,
-      error: error.message || 'Failed to create safe zone in Firestore',
+      error: error.message || "Failed to create safe zone in Firestore",
       code: error.code,
       rawError: error,
     };
@@ -226,27 +282,36 @@ export async function createSafeZone(uid, zoneData) {
  */
 export async function updateSafeZone(uid, safeZoneId, zoneData) {
   if (!uid) {
-    console.error('[Firestore] updateSafeZone aborted: user UID missing');
-    return { success: false, error: 'User is not authenticated' };
+    console.error("[Firestore] updateSafeZone aborted: user UID missing");
+    return { success: false, error: "User is not authenticated" };
   }
   if (!safeZoneId) {
-    console.error('[Firestore] updateSafeZone aborted: safeZoneId missing');
-    return { success: false, error: 'Safe Zone ID is required' };
+    console.error("[Firestore] updateSafeZone aborted: safeZoneId missing");
+    return { success: false, error: "Safe Zone ID is required" };
   }
 
-  const zoneDocRef = doc(db, 'users', uid, 'safeZones', safeZoneId);
+  const zoneDocRef = doc(db, "users", uid, "safeZones", safeZoneId);
   const docPath = `users/${uid}/safeZones/${safeZoneId}`;
 
-  const lat = typeof zoneData.lat === 'number'
-    ? zoneData.lat
-    : (typeof zoneData.center?.lat === 'number' ? zoneData.center.lat : undefined);
-  const lng = typeof zoneData.lng === 'number'
-    ? zoneData.lng
-    : (typeof zoneData.center?.lng === 'number' ? zoneData.center.lng : undefined);
+  const lat =
+    typeof zoneData.lat === "number"
+      ? zoneData.lat
+      : typeof zoneData.center?.lat === "number"
+        ? zoneData.center.lat
+        : undefined;
+  const lng =
+    typeof zoneData.lng === "number"
+      ? zoneData.lng
+      : typeof zoneData.center?.lng === "number"
+        ? zoneData.center.lng
+        : undefined;
 
-  const radiusMeters = typeof zoneData.radiusMeters === 'number'
-    ? zoneData.radiusMeters
-    : (zoneData.radius ? parseInt(zoneData.radius, 10) : undefined);
+  const radiusMeters =
+    typeof zoneData.radiusMeters === "number"
+      ? zoneData.radiusMeters
+      : zoneData.radius
+        ? parseInt(zoneData.radius, 10)
+        : undefined;
 
   const updatePayload = sanitizeZoneData({
     ...(zoneData.name !== undefined && { name: zoneData.name.trim() }),
@@ -259,21 +324,36 @@ export async function updateSafeZone(uid, safeZoneId, zoneData) {
     ...(radiusMeters !== undefined && { radiusMeters }),
     ...(zoneData.polygonPoints !== undefined && {
       polygonPoints: Array.isArray(zoneData.polygonPoints)
-        ? zoneData.polygonPoints.map((pt) => ({ lat: Number(pt.lat), lng: Number(pt.lng) }))
+        ? zoneData.polygonPoints.map((pt) => ({
+            lat: Number(pt.lat),
+            lng: Number(pt.lng),
+          }))
         : null,
     }),
-    ...(zoneData.warningDistance !== undefined && { warningDistance: zoneData.warningDistance }),
-    ...(zoneData.assignedPets !== undefined && { assignedPets: zoneData.assignedPets }),
-    ...(zoneData.alertBehavior !== undefined && { alertBehavior: zoneData.alertBehavior }),
-    ...(zoneData.badgeColor !== undefined && { badgeColor: zoneData.badgeColor }),
-    ...(zoneData.borderColor !== undefined && { borderColor: zoneData.borderColor }),
+    ...(zoneData.warningDistance !== undefined && {
+      warningDistance: zoneData.warningDistance,
+    }),
+    ...(zoneData.assignedPets !== undefined && {
+      assignedPets: zoneData.assignedPets,
+    }),
+    ...(zoneData.alertBehavior !== undefined && {
+      alertBehavior: zoneData.alertBehavior,
+    }),
+    ...(zoneData.badgeColor !== undefined && {
+      badgeColor: zoneData.badgeColor,
+    }),
+    ...(zoneData.borderColor !== undefined && {
+      borderColor: zoneData.borderColor,
+    }),
     ...(zoneData.bgColor !== undefined && { bgColor: zoneData.bgColor }),
-    ...(zoneData.borderStyle !== undefined && { borderStyle: zoneData.borderStyle }),
+    ...(zoneData.borderStyle !== undefined && {
+      borderStyle: zoneData.borderStyle,
+    }),
     ...(zoneData.status !== undefined && { status: zoneData.status }),
     updatedAt: serverTimestamp(),
   });
 
-  console.log('[Firestore] Initiating updateSafeZone write...', {
+  console.log("[Firestore] Initiating updateSafeZone write...", {
     uid,
     safeZoneId,
     path: docPath,
@@ -282,7 +362,9 @@ export async function updateSafeZone(uid, safeZoneId, zoneData) {
 
   try {
     await updateDoc(zoneDocRef, updatePayload);
-    console.log(`[Firestore] updateSafeZone SUCCESS! Document updated at: ${docPath}`);
+    console.log(
+      `[Firestore] updateSafeZone SUCCESS! Document updated at: ${docPath}`,
+    );
 
     return {
       success: true,
@@ -292,7 +374,7 @@ export async function updateSafeZone(uid, safeZoneId, zoneData) {
       },
     };
   } catch (error) {
-    console.error('[Firestore] updateSafeZone FAILED with error:', {
+    console.error("[Firestore] updateSafeZone FAILED with error:", {
       uid,
       safeZoneId,
       path: docPath,
@@ -302,7 +384,7 @@ export async function updateSafeZone(uid, safeZoneId, zoneData) {
     });
     return {
       success: false,
-      error: error.message || 'Failed to update safe zone in Firestore',
+      error: error.message || "Failed to update safe zone in Firestore",
       code: error.code,
       rawError: error,
     };
@@ -314,18 +396,18 @@ export async function updateSafeZone(uid, safeZoneId, zoneData) {
  */
 export async function deleteSafeZone(uid, safeZoneId) {
   if (!uid) {
-    console.error('[Firestore] deleteSafeZone aborted: user UID missing');
-    return { success: false, error: 'User is not authenticated' };
+    console.error("[Firestore] deleteSafeZone aborted: user UID missing");
+    return { success: false, error: "User is not authenticated" };
   }
   if (!safeZoneId) {
-    console.error('[Firestore] deleteSafeZone aborted: safeZoneId missing');
-    return { success: false, error: 'Safe Zone ID is required' };
+    console.error("[Firestore] deleteSafeZone aborted: safeZoneId missing");
+    return { success: false, error: "Safe Zone ID is required" };
   }
 
-  const zoneDocRef = doc(db, 'users', uid, 'safeZones', safeZoneId);
+  const zoneDocRef = doc(db, "users", uid, "safeZones", safeZoneId);
   const docPath = `users/${uid}/safeZones/${safeZoneId}`;
 
-  console.log('[Firestore] Initiating deleteSafeZone write...', {
+  console.log("[Firestore] Initiating deleteSafeZone write...", {
     uid,
     safeZoneId,
     path: docPath,
@@ -333,10 +415,12 @@ export async function deleteSafeZone(uid, safeZoneId) {
 
   try {
     await deleteDoc(zoneDocRef);
-    console.log(`[Firestore] deleteSafeZone SUCCESS! Document deleted at: ${docPath}`);
+    console.log(
+      `[Firestore] deleteSafeZone SUCCESS! Document deleted at: ${docPath}`,
+    );
     return { success: true, id: safeZoneId };
   } catch (error) {
-    console.error('[Firestore] deleteSafeZone FAILED with error:', {
+    console.error("[Firestore] deleteSafeZone FAILED with error:", {
       uid,
       safeZoneId,
       path: docPath,
@@ -346,7 +430,7 @@ export async function deleteSafeZone(uid, safeZoneId) {
     });
     return {
       success: false,
-      error: error.message || 'Failed to delete safe zone from Firestore',
+      error: error.message || "Failed to delete safe zone from Firestore",
       code: error.code,
       rawError: error,
     };

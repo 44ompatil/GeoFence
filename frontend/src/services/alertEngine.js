@@ -1,37 +1,15 @@
-import { createAlert } from './firestore/alerts.js';
+import { createAlert } from "./firestore/alerts.js";
+import {
+  calculateHaversineDistanceMeters,
+  classifyCircularSafeZoneDistance,
+} from "../utils/geofenceMath.js";
+
+export { calculateHaversineDistanceMeters } from "../utils/geofenceMath.js";
 
 /**
  * Calculates real-world geographic distance between two coordinates in meters
  * using the Haversine formula.
  */
-export function calculateHaversineDistanceMeters(lat1, lon1, lat2, lon2) {
-  if (
-    lat1 === undefined || lon1 === undefined || lat2 === undefined || lon2 === undefined ||
-    lat1 === null || lon1 === null || lat2 === null || lon2 === null
-  ) {
-    return 0;
-  }
-  const nLat1 = Number(lat1);
-  const nLon1 = Number(lon1);
-  const nLat2 = Number(lat2);
-  const nLon2 = Number(lon2);
-  if (isNaN(nLat1) || isNaN(nLon1) || isNaN(nLat2) || nLon2 === null || isNaN(nLon2)) {
-    return 0;
-  }
-
-  const R = 6371000; // Earth's radius in meters
-  const dLat = ((nLat2 - nLat1) * Math.PI) / 180;
-  const dLon = ((nLon2 - nLon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((nLat1 * Math.PI) / 180) *
-      Math.cos((nLat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
 /**
  * Helper to compute distance in meters from point P to line segment AB
  * in a local tangent plane approximation.
@@ -72,7 +50,11 @@ export function distanceToPolygonBoundaryMeters(point, polygonPoints) {
 
   const p = { lat: Number(point.lat), lng: Number(point.lng) };
 
-  for (let i = 0, j = polygonPoints.length - 1; i < polygonPoints.length; j = i++) {
+  for (
+    let i = 0, j = polygonPoints.length - 1;
+    i < polygonPoints.length;
+    j = i++
+  ) {
     const a = {
       lat: Number(polygonPoints[j].lat ?? polygonPoints[j].latitude),
       lng: Number(polygonPoints[j].lng ?? polygonPoints[j].longitude),
@@ -100,7 +82,11 @@ export function isPointInsidePolygon(point, polygonPoints) {
   const pLat = Number(point.lat);
   const pLng = Number(point.lng);
 
-  for (let i = 0, j = polygonPoints.length - 1; i < polygonPoints.length; j = i++) {
+  for (
+    let i = 0, j = polygonPoints.length - 1;
+    i < polygonPoints.length;
+    j = i++
+  ) {
     const xi = Number(polygonPoints[i].lat ?? polygonPoints[i].latitude);
     const yi = Number(polygonPoints[i].lng ?? polygonPoints[i].longitude);
     const xj = Number(polygonPoints[j].lat ?? polygonPoints[j].latitude);
@@ -118,12 +104,57 @@ export function isPointInsidePolygon(point, polygonPoints) {
  * Parses numeric distance in meters from strings like '15 m', '20m', '30' or numbers.
  */
 function parseDistanceMeters(val, fallback = 15) {
-  if (typeof val === 'number' && !isNaN(val)) return val;
-  if (typeof val === 'string') {
+  if (typeof val === "number" && !isNaN(val)) return val;
+  if (typeof val === "string") {
     const parsed = parseFloat(val);
     if (!isNaN(parsed)) return parsed;
   }
   return fallback;
+}
+
+function hasValidZoneGeometry(zone) {
+  if (!zone) return false;
+  const isPolygon =
+    zone.shape?.toLowerCase() === "polygon" ||
+    zone.type?.toLowerCase() === "polygon" ||
+    (Array.isArray(zone.polygonPoints) && zone.polygonPoints.length >= 3);
+
+  if (isPolygon) {
+    return (
+      Array.isArray(zone.polygonPoints) &&
+      zone.polygonPoints.length >= 3 &&
+      zone.polygonPoints.every((point) => {
+        const lat = Number(point.lat ?? point.latitude);
+        const lng = Number(point.lng ?? point.longitude);
+        return (
+          Number.isFinite(lat) &&
+          lat >= -90 &&
+          lat <= 90 &&
+          Number.isFinite(lng) &&
+          lng >= -180 &&
+          lng <= 180
+        );
+      })
+    );
+  }
+
+  const lat = Number(zone.center?.lat ?? zone.lat);
+  const lng = Number(zone.center?.lng ?? zone.lng);
+  const radius = Number(zone.radiusMeters ?? parseFloat(zone.radius));
+  const warning = parseDistanceMeters(zone.warningDistance, Number.NaN);
+  return (
+    Number.isFinite(lat) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    Number.isFinite(lng) &&
+    lng >= -180 &&
+    lng <= 180 &&
+    Number.isFinite(radius) &&
+    radius > 0 &&
+    Number.isFinite(warning) &&
+    warning >= 0 &&
+    warning < radius
+  );
 }
 
 /**
@@ -133,12 +164,18 @@ function parseDistanceMeters(val, fallback = 15) {
  */
 export function hasValidPetLocation(pet) {
   if (!pet) return false;
-  if (pet.lat === null || pet.lat === undefined || pet.lng === null || pet.lng === undefined) {
+  if (
+    pet.lat === null ||
+    pet.lat === undefined ||
+    pet.lng === null ||
+    pet.lng === undefined
+  ) {
     return false;
   }
-  const lat = typeof pet.lat === 'number' ? pet.lat : parseFloat(pet.lat);
-  const lng = typeof pet.lng === 'number' ? pet.lng : parseFloat(pet.lng);
-  if (isNaN(lat) || isNaN(lng) || !isFinite(lat) || !isFinite(lng)) return false;
+  const lat = typeof pet.lat === "number" ? pet.lat : parseFloat(pet.lat);
+  const lng = typeof pet.lng === "number" ? pet.lng : parseFloat(pet.lng);
+  if (isNaN(lat) || isNaN(lng) || !isFinite(lat) || !isFinite(lng))
+    return false;
   if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return false;
   // Uninitialized GPS stream
   if (lat === 0 && lng === 0) return false;
@@ -155,17 +192,21 @@ export function hasValidPetLocation(pet) {
  * If the zone's center, radius, polygon vertices, or update timestamp change, the signature changes.
  */
 export function getZoneSignature(zone) {
-  if (!zone) return '';
+  if (!zone) return "";
   const pts = Array.isArray(zone.polygonPoints)
-    ? zone.polygonPoints.map((p) => `${Number(p.lat).toFixed(6)},${Number(p.lng).toFixed(6)}`).join(';')
-    : '';
+    ? zone.polygonPoints
+        .map((p) => `${Number(p.lat).toFixed(6)},${Number(p.lng).toFixed(6)}`)
+        .join(";")
+    : "";
   const lat = Number(zone.center?.lat ?? zone.lat ?? 0).toFixed(6);
   const lng = Number(zone.center?.lng ?? zone.lng ?? 0).toFixed(6);
-  const radius = Number(zone.radiusMeters || parseFloat(zone.radius) || 0).toFixed(1);
-  const shape = (zone.shape || (pts ? 'Polygon' : 'Circle')).toLowerCase();
+  const radius = Number(
+    zone.radiusMeters || parseFloat(zone.radius) || 0,
+  ).toFixed(1);
+  const shape = (zone.shape || (pts ? "Polygon" : "Circle")).toLowerCase();
   const warning = parseDistanceMeters(zone.warningDistance, 15);
-  const updated = zone.updatedAt?.toMillis?.() || zone.updatedAt?.seconds || '';
-  return `${zone.id || ''}_${shape}_${lat}_${lng}_${radius}_${pts}_${warning}_${updated}`;
+  const updated = zone.updatedAt?.toMillis?.() || zone.updatedAt?.seconds || "";
+  return `${zone.id || ""}_${shape}_${lat}_${lng}_${radius}_${pts}_${warning}_${updated}`;
 }
 
 /**
@@ -177,39 +218,48 @@ export function getZoneSignature(zone) {
 export function evaluatePetZoneStatus(pet, zone, defaultWarningDist = 15) {
   if (!hasValidPetLocation(pet) || !zone) {
     return {
-      state: 'NO_LOCATION',
+      state: "NO_LOCATION",
       distanceToBoundary: 0,
-      zoneName: zone?.name || 'Safe Zone',
-      zoneId: zone?.id || '',
+      zoneName: zone?.name || "Safe Zone",
+      zoneId: zone?.id || "",
     };
   }
 
   const petLat = parseFloat(pet.lat);
   const petLng = parseFloat(pet.lng);
-  const warningDistance = parseDistanceMeters(zone.warningDistance || defaultWarningDist, 15);
+  const warningDistance = parseDistanceMeters(
+    zone.warningDistance || defaultWarningDist,
+    15,
+  );
 
   // Check shape and type carefully to resolve any mismatch (e.g. zone.shape === 'Polygon' vs zone.type)
   const isPolygon =
-    zone.shape?.toLowerCase() === 'polygon' ||
-    zone.type?.toLowerCase() === 'polygon' ||
+    zone.shape?.toLowerCase() === "polygon" ||
+    zone.type?.toLowerCase() === "polygon" ||
     (Array.isArray(zone.polygonPoints) && zone.polygonPoints.length >= 3);
 
   const isRestricted =
-    zone.status === 'Restricted' ||
-    zone.type === 'Danger Perimeter' ||
-    zone.type === 'Restricted';
+    zone.status === "Restricted" ||
+    zone.type === "Danger Perimeter" ||
+    zone.type === "Restricted";
 
   if (isPolygon) {
-    const isInside = isPointInsidePolygon({ lat: petLat, lng: petLng }, zone.polygonPoints);
+    const isInside = isPointInsidePolygon(
+      { lat: petLat, lng: petLng },
+      zone.polygonPoints,
+    );
     const distToEdge = Math.round(
-      distanceToPolygonBoundaryMeters({ lat: petLat, lng: petLng }, zone.polygonPoints)
+      distanceToPolygonBoundaryMeters(
+        { lat: petLat, lng: petLng },
+        zone.polygonPoints,
+      ),
     );
 
     if (isRestricted) {
       // Danger Perimeter: being INSIDE is a breach
       if (isInside) {
         return {
-          state: 'OUTSIDE',
+          state: "OUTSIDE",
           distanceToBoundary: distToEdge,
           zoneName: zone.name,
           zoneId: zone.id,
@@ -217,7 +267,7 @@ export function evaluatePetZoneStatus(pet, zone, defaultWarningDist = 15) {
         };
       } else if (distToEdge <= warningDistance) {
         return {
-          state: 'APPROACHING',
+          state: "APPROACHING",
           distanceToBoundary: distToEdge,
           zoneName: zone.name,
           zoneId: zone.id,
@@ -225,7 +275,7 @@ export function evaluatePetZoneStatus(pet, zone, defaultWarningDist = 15) {
         };
       } else {
         return {
-          state: 'SAFE',
+          state: "SAFE",
           distanceToBoundary: distToEdge,
           zoneName: zone.name,
           zoneId: zone.id,
@@ -236,21 +286,21 @@ export function evaluatePetZoneStatus(pet, zone, defaultWarningDist = 15) {
       // Normal Safe Zone: being OUTSIDE is a breach
       if (!isInside) {
         return {
-          state: 'OUTSIDE',
+          state: "OUTSIDE",
           distanceToBoundary: distToEdge,
           zoneName: zone.name,
           zoneId: zone.id,
         };
       } else if (distToEdge <= warningDistance) {
         return {
-          state: 'APPROACHING',
+          state: "APPROACHING",
           distanceToBoundary: distToEdge,
           zoneName: zone.name,
           zoneId: zone.id,
         };
       } else {
         return {
-          state: 'SAFE',
+          state: "SAFE",
           distanceToBoundary: distToEdge,
           zoneName: zone.name,
           zoneId: zone.id,
@@ -263,14 +313,19 @@ export function evaluatePetZoneStatus(pet, zone, defaultWarningDist = 15) {
     const centerLng = parseFloat(zone.center?.lng ?? zone.lng ?? 0);
     const radiusMeters = parseFloat(zone.radiusMeters || zone.radius || 50);
 
-    const distToCenter = calculateHaversineDistanceMeters(petLat, petLng, centerLat, centerLng);
+    const distToCenter = calculateHaversineDistanceMeters(
+      petLat,
+      petLng,
+      centerLat,
+      centerLng,
+    );
     const distToBoundary = radiusMeters - distToCenter; // positive when inside, negative when outside
 
     if (isRestricted) {
       // Danger Perimeter: inside circle = breach
       if (distToCenter <= radiusMeters) {
         return {
-          state: 'OUTSIDE',
+          state: "OUTSIDE",
           distanceToBoundary: Math.round(distToCenter),
           zoneName: zone.name,
           zoneId: zone.id,
@@ -278,7 +333,7 @@ export function evaluatePetZoneStatus(pet, zone, defaultWarningDist = 15) {
         };
       } else if (distToCenter - radiusMeters <= warningDistance) {
         return {
-          state: 'APPROACHING',
+          state: "APPROACHING",
           distanceToBoundary: Math.round(distToCenter - radiusMeters),
           zoneName: zone.name,
           zoneId: zone.id,
@@ -286,7 +341,7 @@ export function evaluatePetZoneStatus(pet, zone, defaultWarningDist = 15) {
         };
       } else {
         return {
-          state: 'SAFE',
+          state: "SAFE",
           distanceToBoundary: Math.round(distToCenter - radiusMeters),
           zoneName: zone.name,
           zoneId: zone.id,
@@ -295,23 +350,36 @@ export function evaluatePetZoneStatus(pet, zone, defaultWarningDist = 15) {
       }
     } else {
       // Standard circular safe zone
-      if (distToCenter > radiusMeters) {
+      const state = classifyCircularSafeZoneDistance(
+        distToCenter,
+        radiusMeters,
+        warningDistance,
+      );
+      if (state === "NO_CONFIG") {
         return {
-          state: 'OUTSIDE',
+          state: "NO_LOCATION",
+          distanceToBoundary: 0,
+          zoneName: zone.name,
+          zoneId: zone.id,
+        };
+      }
+      if (state === "BREACH") {
+        return {
+          state: "OUTSIDE",
           distanceToBoundary: Math.round(distToCenter - radiusMeters),
           zoneName: zone.name,
           zoneId: zone.id,
         };
-      } else if (distToBoundary <= warningDistance) {
+      } else if (state === "APPROACHING") {
         return {
-          state: 'APPROACHING',
+          state: "APPROACHING",
           distanceToBoundary: Math.round(distToBoundary),
           zoneName: zone.name,
           zoneId: zone.id,
         };
       } else {
         return {
-          state: 'SAFE',
+          state: "SAFE",
           distanceToBoundary: Math.round(distToBoundary),
           zoneName: zone.name,
           zoneId: zone.id,
@@ -340,14 +408,17 @@ export async function evaluatePetsAndGenerateAlerts({
   if (!uid || !pets || pets.length === 0) return;
 
   const notificationsSettings = settings?.notifications || {};
-  const warningDist = parseDistanceMeters(settings?.tracking?.boundaryWarningDistance, 15);
+  const warningDist = parseDistanceMeters(
+    settings?.tracking?.boundaryWarningDistance,
+    15,
+  );
 
   for (const pet of pets) {
     const petId = pet.id;
     if (!petId) continue;
 
     const prevEvaluation = petEvaluationHistory.get(petId) || {
-      boundaryState: 'UNINITIALIZED',
+      boundaryState: "UNINITIALIZED",
       breachedZoneId: null,
       zoneSignature: null,
       batteryLow: false,
@@ -360,7 +431,7 @@ export async function evaluatePetsAndGenerateAlerts({
     if (!hasValidPetLocation(pet)) {
       petEvaluationHistory.set(petId, {
         ...prevEvaluation,
-        boundaryState: 'NO_LOCATION',
+        boundaryState: "NO_LOCATION",
         initialized: true,
       });
       continue;
@@ -368,25 +439,40 @@ export async function evaluatePetsAndGenerateAlerts({
 
     // 2. Find applicable safe zones respecting explicit pet-to-zone assignment
     const applicableZones = safeZones.filter((zone) => {
-      if (zone.status === 'Inactive' || zone.disabled === true) return false;
+      if (
+        zone.status === "Inactive" ||
+        zone.disabled === true ||
+        !hasValidZoneGeometry(zone)
+      )
+        return false;
+
+      // The explicit pet document reference is the canonical assignment.
+      // Legacy assignments below remain for documents not yet migrated.
+      if (pet.safeZoneId) return pet.safeZoneId === zone.id;
 
       // Check explicit assignedPets array (IDs or names)
       if (Array.isArray(zone.assignedPets) && zone.assignedPets.length > 0) {
         const isAssigned = zone.assignedPets.some(
-          (assigned) => assigned === petId || assigned === pet.name
+          (assigned) => assigned === petId || assigned === pet.name,
         );
         if (isAssigned) return true;
       }
 
       // Check matching zone name on pet profile
-      if (pet.zone && zone.name && pet.zone.trim().toLowerCase() === zone.name.trim().toLowerCase()) {
+      if (
+        pet.zone &&
+        zone.name &&
+        pet.zone.trim().toLowerCase() === zone.name.trim().toLowerCase()
+      ) {
         return true;
       }
 
       // If zone has no explicit assignments and pet has no specific zone, apply as general zone
       if (
         (!zone.assignedPets || zone.assignedPets.length === 0) &&
-        (!pet.zone || pet.zone === 'Home Zone' || pet.zone === 'Designated Zone')
+        (!pet.zone ||
+          pet.zone === "Home Zone" ||
+          pet.zone === "Designated Zone")
       ) {
         return true;
       }
@@ -398,7 +484,7 @@ export async function evaluatePetsAndGenerateAlerts({
     if (applicableZones.length === 0) {
       petEvaluationHistory.set(petId, {
         ...prevEvaluation,
-        boundaryState: 'NO_ZONE',
+        boundaryState: "NO_ZONE",
         breachedZoneId: null,
         zoneSignature: null,
         initialized: true,
@@ -416,52 +502,61 @@ export async function evaluatePetsAndGenerateAlerts({
 
     for (const zone of applicableZones) {
       const result = evaluatePetZoneStatus(pet, zone, warningDist);
-      const isRestricted = zone.status === 'Restricted' || zone.type === 'Danger Perimeter';
+      const isRestricted =
+        zone.status === "Restricted" || zone.type === "Danger Perimeter";
 
       if (isRestricted) {
-        if (result.state === 'OUTSIDE') {
+        if (result.state === "OUTSIDE") {
           breachedRestrictedZones.push({ zone, result });
-        } else if (result.state === 'APPROACHING') {
-          if (!closestApproaching || result.distanceToBoundary < closestApproaching.result.distanceToBoundary) {
+        } else if (result.state === "APPROACHING") {
+          if (
+            !closestApproaching ||
+            result.distanceToBoundary <
+              closestApproaching.result.distanceToBoundary
+          ) {
             closestApproaching = { zone, result };
           }
         }
       } else {
-        if (result.state === 'SAFE') {
+        if (result.state === "SAFE") {
           insideAnySafeZone = true;
-        } else if (result.state === 'APPROACHING') {
-          if (!closestApproaching || result.distanceToBoundary < closestApproaching.result.distanceToBoundary) {
+        } else if (result.state === "APPROACHING") {
+          if (
+            !closestApproaching ||
+            result.distanceToBoundary <
+              closestApproaching.result.distanceToBoundary
+          ) {
             closestApproaching = { zone, result };
           }
-        } else if (result.state === 'OUTSIDE') {
+        } else if (result.state === "OUTSIDE") {
           outsideStandardZones.push({ zone, result });
         }
       }
     }
 
     const standardSafeZones = applicableZones.filter(
-      (z) => z.status !== 'Restricted' && z.type !== 'Danger Perimeter'
+      (z) => z.status !== "Restricted" && z.type !== "Danger Perimeter",
     );
 
-    let currentBoundaryState = 'SAFE';
+    let currentBoundaryState = "SAFE";
     let triggeredZone = null;
     let distFromBoundary = 0;
 
     // Restricted zone breach takes top priority
     if (breachedRestrictedZones.length > 0) {
-      currentBoundaryState = 'OUTSIDE';
+      currentBoundaryState = "OUTSIDE";
       triggeredZone = breachedRestrictedZones[0].zone;
       distFromBoundary = breachedRestrictedZones[0].result.distanceToBoundary;
     } else if (standardSafeZones.length > 0) {
       if (insideAnySafeZone) {
-        currentBoundaryState = 'SAFE';
+        currentBoundaryState = "SAFE";
       } else if (outsideStandardZones.length === standardSafeZones.length) {
         // Outside ALL designated safe zones
-        currentBoundaryState = 'OUTSIDE';
+        currentBoundaryState = "OUTSIDE";
         triggeredZone = outsideStandardZones[0].zone;
         distFromBoundary = outsideStandardZones[0].result.distanceToBoundary;
       } else if (closestApproaching) {
-        currentBoundaryState = 'APPROACHING';
+        currentBoundaryState = "APPROACHING";
         triggeredZone = closestApproaching.zone;
         distFromBoundary = closestApproaching.result.distanceToBoundary;
       }
@@ -474,8 +569,8 @@ export async function evaluatePetsAndGenerateAlerts({
       (a) =>
         !a.resolved &&
         a.petId === petId &&
-        a.type === 'BOUNDARY_BREACH' &&
-        (a.zoneId === triggeredZone?.id || a.zone === triggeredZone?.name)
+        a.type === "BOUNDARY_BREACH" &&
+        (a.zoneId === triggeredZone?.id || a.zone === triggeredZone?.name),
     );
 
     // 5. Evaluate Boundary Breach Alert Condition
@@ -484,9 +579,9 @@ export async function evaluatePetsAndGenerateAlerts({
     // - AND there is no active breach alert already in Firestore
     // - AND (this is a fresh transition from SAFE/APPROACHING OR the safe zone definition/boundaries changed)
     const isNewBreachTransition =
-      currentBoundaryState === 'OUTSIDE' &&
+      currentBoundaryState === "OUTSIDE" &&
       !hasActiveBreachInFirestore &&
-      (prevEvaluation.boundaryState !== 'OUTSIDE' ||
+      (prevEvaluation.boundaryState !== "OUTSIDE" ||
         prevEvaluation.breachedZoneId !== triggeredZone?.id ||
         prevEvaluation.zoneSignature !== currentZoneSignature);
 
@@ -494,20 +589,20 @@ export async function evaluatePetsAndGenerateAlerts({
       if (notificationsSettings.boundaryBreach !== false) {
         const breachMsg =
           distFromBoundary > 0
-            ? `${pet.name} has left safe zone "${triggeredZone?.name || 'Designated Zone'}" (${distFromBoundary}m outside)!`
-            : `${pet.name} has left safe zone "${triggeredZone?.name || 'Designated Zone'}"!`;
+            ? `${pet.name} has left safe zone "${triggeredZone?.name || "Designated Zone"}" (${distFromBoundary}m outside)!`
+            : `${pet.name} has left safe zone "${triggeredZone?.name || "Designated Zone"}"!`;
 
         const newAlertData = {
           petId: pet.id,
           petName: pet.name,
           petColor: pet.color,
-          type: 'BOUNDARY_BREACH',
-          severity: 'CRITICAL',
-          title: 'Boundary Breach',
-          event: 'Boundary Breach',
+          type: "BOUNDARY_BREACH",
+          severity: "CRITICAL",
+          title: "Boundary Breach",
+          event: "Boundary Breach",
           message: breachMsg,
-          zone: triggeredZone?.name || 'Designated Zone',
-          zoneId: triggeredZone?.id || '',
+          zone: triggeredZone?.name || "Designated Zone",
+          zoneId: triggeredZone?.id || "",
           distanceFromBoundary: distFromBoundary,
         };
 
@@ -519,31 +614,34 @@ export async function evaluatePetsAndGenerateAlerts({
     }
     // 6. Evaluate Approaching Boundary Transition
     else if (
-      currentBoundaryState === 'APPROACHING' &&
-      prevEvaluation.boundaryState === 'SAFE'
+      currentBoundaryState === "APPROACHING" &&
+      prevEvaluation.boundaryState === "SAFE"
     ) {
       const hasActiveApproachAlert = alerts.some(
         (a) =>
           !a.resolved &&
           a.petId === petId &&
-          a.type === 'APPROACHING_BOUNDARY' &&
-          (a.zoneId === triggeredZone?.id || a.zone === triggeredZone?.name)
+          a.type === "APPROACHING_BOUNDARY" &&
+          (a.zoneId === triggeredZone?.id || a.zone === triggeredZone?.name),
       );
 
-      if (!hasActiveApproachAlert && notificationsSettings.approachingBoundary !== false) {
-        const approachMsg = `${pet.name} is approaching the boundary of "${triggeredZone?.name || 'Designated Zone'}" (${distFromBoundary}m remaining).`;
+      if (
+        !hasActiveApproachAlert &&
+        notificationsSettings.approachingBoundary !== false
+      ) {
+        const approachMsg = `${pet.name} is approaching the boundary of "${triggeredZone?.name || "Designated Zone"}" (${distFromBoundary}m remaining).`;
 
         const newAlertData = {
           petId: pet.id,
           petName: pet.name,
           petColor: pet.color,
-          type: 'APPROACHING_BOUNDARY',
-          severity: 'CAUTION',
-          title: 'Approaching Boundary',
-          event: 'Approaching Boundary',
+          type: "APPROACHING_BOUNDARY",
+          severity: "CAUTION",
+          title: "Approaching Boundary",
+          event: "Approaching Boundary",
           message: approachMsg,
-          zone: triggeredZone?.name || 'Designated Zone',
-          zoneId: triggeredZone?.id || '',
+          zone: triggeredZone?.name || "Designated Zone",
+          zoneId: triggeredZone?.id || "",
           distanceFromBoundary: distFromBoundary,
         };
 
@@ -556,19 +654,20 @@ export async function evaluatePetsAndGenerateAlerts({
 
     // 7. Check Low Battery Transition
     const currentBattery = pet.collarBattery ?? pet.battery;
-    const isBatteryLow = typeof currentBattery === 'number' && currentBattery <= 20;
+    const isBatteryLow =
+      typeof currentBattery === "number" && currentBattery <= 20;
     if (isBatteryLow && !prevEvaluation.batteryLow) {
       if (notificationsSettings.lowBattery !== false) {
         const createRes = await createAlert(uid, {
           petId: pet.id,
           petName: pet.name,
           petColor: pet.color,
-          type: 'LOW_BATTERY',
-          severity: 'CAUTION',
-          title: 'Low Battery',
-          event: 'Low Battery',
+          type: "LOW_BATTERY",
+          severity: "CAUTION",
+          title: "Low Battery",
+          event: "Low Battery",
           message: `${pet.name}'s tracker battery is low (${currentBattery}%).`,
-          zone: triggeredZone?.name || pet.zone || 'Safe Zone',
+          zone: triggeredZone?.name || pet.zone || "Safe Zone",
         });
         if (createRes.success && createRes.alert && onNewAlert) {
           onNewAlert(createRes.alert);
@@ -578,19 +677,20 @@ export async function evaluatePetsAndGenerateAlerts({
 
     // 8. Check Device Offline Transition
     const hasTracker = Boolean(pet.deviceId || pet.trackerId);
-    const isOffline = hasTracker && (pet.status === 'Offline' || pet.isOffline === true);
+    const isOffline =
+      hasTracker && (pet.status === "Offline" || pet.isOffline === true);
     if (isOffline && !prevEvaluation.isOffline) {
       if (notificationsSettings.deviceOffline !== false) {
         const createRes = await createAlert(uid, {
           petId: pet.id,
           petName: pet.name,
           petColor: pet.color,
-          type: 'DEVICE_OFFLINE',
-          severity: 'HIGH RISK',
-          title: 'Device Offline',
-          event: 'Device Offline',
+          type: "DEVICE_OFFLINE",
+          severity: "HIGH RISK",
+          title: "Device Offline",
+          event: "Device Offline",
           message: `${pet.name}'s tracker has not checked in.`,
-          zone: triggeredZone?.name || pet.zone || 'Safe Zone',
+          zone: triggeredZone?.name || pet.zone || "Safe Zone",
         });
         if (createRes.success && createRes.alert && onNewAlert) {
           onNewAlert(createRes.alert);
@@ -600,24 +700,28 @@ export async function evaluatePetsAndGenerateAlerts({
 
     // 9. Check High Risk Movement Transition
     const isHighRisk =
-      pet.riskLevel === 'High' ||
-      pet.riskLevel === 'HIGH' ||
-      pet.riskLevel === 'CRITICAL' ||
-      pet.status === 'High Risk' ||
-      pet.status === 'Escaped';
+      pet.riskLevel === "High" ||
+      pet.riskLevel === "HIGH" ||
+      pet.riskLevel === "CRITICAL" ||
+      pet.status === "High Risk" ||
+      pet.status === "Escaped";
 
-    if (isHighRisk && !prevEvaluation.highRisk && currentBoundaryState !== 'OUTSIDE') {
+    if (
+      isHighRisk &&
+      !prevEvaluation.highRisk &&
+      currentBoundaryState !== "OUTSIDE"
+    ) {
       if (notificationsSettings.highRiskMovement !== false) {
         const createRes = await createAlert(uid, {
           petId: pet.id,
           petName: pet.name,
           petColor: pet.color,
-          type: 'HIGH_RISK_MOVEMENT',
-          severity: 'HIGH RISK',
-          title: 'High-Risk Movement',
-          event: 'High-Risk Movement',
+          type: "HIGH_RISK_MOVEMENT",
+          severity: "HIGH RISK",
+          title: "High-Risk Movement",
+          event: "High-Risk Movement",
           message: `Unusual speed or rapid boundary approach detected for ${pet.name}.`,
-          zone: triggeredZone?.name || pet.zone || 'Safe Zone',
+          zone: triggeredZone?.name || pet.zone || "Safe Zone",
         });
         if (createRes.success && createRes.alert && onNewAlert) {
           onNewAlert(createRes.alert);
@@ -630,8 +734,10 @@ export async function evaluatePetsAndGenerateAlerts({
     // so any subsequent breach will fire a new alert cleanly.
     petEvaluationHistory.set(petId, {
       boundaryState: currentBoundaryState,
-      breachedZoneId: currentBoundaryState === 'OUTSIDE' ? triggeredZone?.id : null,
-      zoneSignature: currentBoundaryState === 'OUTSIDE' ? currentZoneSignature : null,
+      breachedZoneId:
+        currentBoundaryState === "OUTSIDE" ? triggeredZone?.id : null,
+      zoneSignature:
+        currentBoundaryState === "OUTSIDE" ? currentZoneSignature : null,
       batteryLow: isBatteryLow,
       isOffline: isOffline,
       highRisk: isHighRisk,
@@ -646,4 +752,3 @@ export async function evaluatePetsAndGenerateAlerts({
 export function resetAlertEngineState() {
   petEvaluationHistory.clear();
 }
-

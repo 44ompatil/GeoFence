@@ -260,7 +260,15 @@ function AuthenticatedApp() {
         error: "Create a safe zone before adding a pet.",
       };
     }
-    const result = await createPet(currentUser.uid, petData);
+    const assignedZone =
+      safeZones.find((zone) => zone.id === petData.safeZoneId) ||
+      safeZones.find((zone) => zone.id === selectedPet?.safeZoneId) ||
+      safeZones[0];
+    const result = await createPet(currentUser.uid, {
+      ...petData,
+      safeZoneId: petData.safeZoneId || assignedZone?.id || null,
+      zone: petData.zone || assignedZone?.name || "Home Zone",
+    });
     if (result.success && result.pet) {
       if (!selectedPetId) {
         setSelectedPetId(result.pet.id);
@@ -289,11 +297,36 @@ function AuthenticatedApp() {
   };
 
   // --- Firestore Safe Zone Operations ---
+  const persistPetZoneAssignments = async (zoneId, assignedPetIds) => {
+    const selectedIds = new Set(assignedPetIds);
+    const petsToUpdate = pets.filter(
+      (pet) => selectedIds.has(pet.id) || pet.safeZoneId === zoneId,
+    );
+    const updates = await Promise.all(
+      petsToUpdate.map((pet) => {
+        const safeZoneId = selectedIds.has(pet.id) ? zoneId : null;
+        return updatePet(currentUser.uid, pet.id, { safeZoneId });
+      }),
+    );
+    const failed = updates.find((result) => !result.success);
+    return failed || { success: true };
+  };
+
   const handleAddSafeZone = async (zoneData) => {
     if (!currentUser?.uid)
       return { success: false, error: "User unauthenticated" };
     const result = await createSafeZone(currentUser.uid, zoneData);
     if (result.success && result.zone) {
+      const assignmentResult = await persistPetZoneAssignments(
+        result.zone.id,
+        result.zone.assignedPets || [],
+      );
+      if (!assignmentResult.success) {
+        return {
+          success: false,
+          error: `Zone saved, but pet assignment failed: ${assignmentResult.error}`,
+        };
+      }
       const updatedZones = [...safeZones, result.zone];
       evaluatePetsAndGenerateAlerts({
         uid: currentUser.uid,
@@ -317,6 +350,16 @@ function AuthenticatedApp() {
       return { success: false, error: "User unauthenticated" };
     const result = await updateSafeZone(currentUser.uid, zoneId, zoneData);
     if (result.success) {
+      const assignmentResult = await persistPetZoneAssignments(
+        zoneId,
+        zoneData.assignedPets || [],
+      );
+      if (!assignmentResult.success) {
+        return {
+          success: false,
+          error: `Zone saved, but pet assignment failed: ${assignmentResult.error}`,
+        };
+      }
       const updatedZones = safeZones.map((z) =>
         z.id === zoneId ? { ...z, ...zoneData } : z,
       );
@@ -340,7 +383,18 @@ function AuthenticatedApp() {
   const handleDeleteSafeZone = async (zoneToDelete) => {
     if (!currentUser?.uid)
       return { success: false, error: "User unauthenticated" };
-    return await deleteSafeZone(currentUser.uid, zoneToDelete.id);
+    const result = await deleteSafeZone(currentUser.uid, zoneToDelete.id);
+    if (!result.success) return result;
+    const assignmentResult = await persistPetZoneAssignments(
+      zoneToDelete.id,
+      [],
+    );
+    return assignmentResult.success
+      ? result
+      : {
+          success: false,
+          error: `Zone deleted, but pet assignment cleanup failed: ${assignmentResult.error}`,
+        };
   };
 
   // --- Firestore Alert Operations ---

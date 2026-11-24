@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect } from "react";
 
-const MAP_TYPE_KEY = 'geofence_map_type';
-const MAP_CENTER_KEY = 'geofence_last_map_center';
-const MAP_ZOOM_KEY = 'geofence_last_map_zoom';
+const MAP_TYPE_KEY = "geofence_map_type";
+const MAP_CENTER_KEY = "geofence_last_map_center";
+const MAP_ZOOM_KEY = "geofence_last_map_zoom";
 
-export const DEFAULT_MAP_CENTER = { lat: 18.6445, lng: 73.7550 };
-export const DEFAULT_MAP_ZOOM = 16;
+export const DEFAULT_MAP_CENTER = { lat: 0, lng: 0 };
+export const DEFAULT_MAP_ZOOM = 2;
 
 /**
  * Gets the persisted map mode from localStorage ('Map' | 'Satellite').
@@ -13,9 +13,9 @@ export const DEFAULT_MAP_ZOOM = 16;
 export function getPersistedMapType() {
   try {
     const saved = localStorage.getItem(MAP_TYPE_KEY);
-    return saved === 'Satellite' ? 'Satellite' : 'Map';
+    return saved === "Satellite" ? "Satellite" : "Map";
   } catch (e) {
-    return 'Map';
+    return "Map";
   }
 }
 
@@ -24,13 +24,13 @@ export function getPersistedMapType() {
  */
 export function setPersistedMapType(mode) {
   try {
-    const validMode = mode === 'Satellite' ? 'Satellite' : 'Map';
+    const validMode = mode === "Satellite" ? "Satellite" : "Map";
     localStorage.setItem(MAP_TYPE_KEY, validMode);
     window.dispatchEvent(
-      new CustomEvent('geofence_map_type_change', { detail: validMode })
+      new CustomEvent("geofence_map_type_change", { detail: validMode }),
     );
   } catch (e) {
-    console.warn('Failed to save map type to localStorage', e);
+    console.warn("Failed to save map type to localStorage", e);
   }
 }
 
@@ -53,12 +53,12 @@ export function usePersistedMapType() {
       }
     };
 
-    window.addEventListener('geofence_map_type_change', handleChange);
-    window.addEventListener('storage', handleStorage);
+    window.addEventListener("geofence_map_type_change", handleChange);
+    window.addEventListener("storage", handleStorage);
 
     return () => {
-      window.removeEventListener('geofence_map_type_change', handleChange);
-      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener("geofence_map_type_change", handleChange);
+      window.removeEventListener("storage", handleStorage);
     };
   }, []);
 
@@ -114,7 +114,7 @@ export function getLastMapZoom() {
  */
 export function setLastMapZoom(zoom) {
   try {
-    if (typeof zoom === 'number') {
+    if (typeof zoom === "number") {
       localStorage.setItem(MAP_ZOOM_KEY, zoom.toString());
     }
   } catch (e) {}

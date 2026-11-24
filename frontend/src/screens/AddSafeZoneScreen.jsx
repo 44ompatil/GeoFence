@@ -1,11 +1,8 @@
-import { useState, useEffect } from 'react';
-import {
-  Check,
-  ChevronDown,
-} from 'lucide-react';
-import GoogleMapCanvas from '../components/maps/GoogleMapCanvas';
+import { useState, useEffect } from "react";
+import { Check, ChevronDown } from "lucide-react";
+import GoogleMapCanvas from "../components/maps/GoogleMapCanvas";
 
-const DEFAULT_CENTER = { lat: 18.6445, lng: 73.7550 };
+const DEFAULT_CENTER = { lat: 0, lng: 0 };
 
 export default function AddSafeZoneScreen({
   onCancel,
@@ -17,27 +14,37 @@ export default function AddSafeZoneScreen({
   editZone = null,
 }) {
   const isEditing = Boolean(editZone);
+  const initialZoneCenter =
+    selectedPet?.hasFix === true &&
+    Number.isFinite(selectedPet.lat) &&
+    Number.isFinite(selectedPet.lng)
+      ? { lat: selectedPet.lat, lng: selectedPet.lng }
+      : safeZones.find(
+          (zone) =>
+            Number.isFinite(zone.center?.lat) &&
+            Number.isFinite(zone.center?.lng),
+        )?.center || DEFAULT_CENTER;
 
-  const [zoneName, setZoneName] = useState('Home');
-  const [zoneType, setZoneType] = useState('Circle'); // 'Circle' or 'Polygon'
-  const [radius, setRadius] = useState('50 m');
-  const [boundaryWarning, setBoundaryWarning] = useState('15 m');
+  const [zoneName, setZoneName] = useState("Home");
+  const [zoneType, setZoneType] = useState("Circle"); // 'Circle' or 'Polygon'
+  const [radius, setRadius] = useState("50 m");
+  const [boundaryWarning, setBoundaryWarning] = useState("15 m");
   const [selectedPets, setSelectedPets] = useState([]);
   const [approachesBoundary, setApproachesBoundary] = useState(true);
   const [leavesSafeZone, setLeavesSafeZone] = useState(true);
 
   // Real GPS center coordinates
-  const [center, setCenter] = useState(DEFAULT_CENTER);
+  const [center, setCenter] = useState(initialZoneCenter);
+  const [centerConfigured, setCenterConfigured] = useState(
+    selectedPet?.hasFix === true &&
+      Number.isFinite(selectedPet.lat) &&
+      Number.isFinite(selectedPet.lng),
+  );
 
   // Real GPS polygon points
-  const [polygonPoints, setPolygonPoints] = useState([
-    { lat: 18.6465, lng: 73.7530 },
-    { lat: 18.6475, lng: 73.7570 },
-    { lat: 18.6440, lng: 73.7585 },
-    { lat: 18.6425, lng: 73.7545 },
-  ]);
+  const [polygonPoints, setPolygonPoints] = useState([]);
 
-  const [nameError, setNameError] = useState('');
+  const [nameError, setNameError] = useState("");
 
   // Extract radius in meters
   const radiusMeters = parseInt(radius, 10) || 50;
@@ -45,52 +52,83 @@ export default function AddSafeZoneScreen({
   // Initialize form state from editZone
   useEffect(() => {
     if (editZone) {
-      setZoneName(editZone.name || 'Home');
+      setZoneName(editZone.name || "Home");
       setZoneType(
-        editZone.shape || (editZone.borderStyle === 'solid' ? 'Polygon' : 'Circle')
+        editZone.shape ||
+          (editZone.borderStyle === "solid" ? "Polygon" : "Circle"),
       );
       setRadius(
         editZone.radius ||
-          (editZone.radiusMeters ? `${editZone.radiusMeters} m` : '50 m')
+          (editZone.radiusMeters ? `${editZone.radiusMeters} m` : "50 m"),
       );
       setBoundaryWarning(
-        editZone.warningDistance || `${editZone.warningBuffer || 15} m`
+        editZone.warningDistance || `${editZone.warningBuffer || 15} m`,
       );
-      setSelectedPets(editZone.assignedPets || []);
-      setApproachesBoundary(
-        editZone.alertBehavior?.approachesBoundary ?? true
-      );
+      const assignedPetIds = pets
+        .filter((pet) =>
+          pet.safeZoneId
+            ? pet.safeZoneId === editZone.id
+            : (editZone.assignedPets || []).some(
+                (assigned) => assigned === pet.id || assigned === pet.name,
+              ),
+        )
+        .map((pet) => pet.id);
+      setSelectedPets(assignedPetIds);
+      setApproachesBoundary(editZone.alertBehavior?.approachesBoundary ?? true);
       setLeavesSafeZone(editZone.alertBehavior?.leavesSafeZone ?? true);
 
-      if (editZone.center?.lat && editZone.center?.lng) {
+      if (
+        Number.isFinite(editZone.center?.lat) &&
+        Number.isFinite(editZone.center?.lng)
+      ) {
         setCenter({ lat: editZone.center.lat, lng: editZone.center.lng });
+        setCenterConfigured(true);
+      } else {
+        setCenterConfigured(false);
       }
 
       if (editZone.polygonPoints?.length) {
         setPolygonPoints(editZone.polygonPoints);
       }
     } else {
-      setZoneName('Home');
-      setZoneType('Circle');
-      setRadius('50 m');
-      setBoundaryWarning('15 m');
+      setZoneName("Home");
+      setZoneType("Circle");
+      setRadius("50 m");
+      setBoundaryWarning("15 m");
 
-      const availableNames = pets.map((p) => p.name);
-      setSelectedPets(availableNames);
+      setSelectedPets(pets.map((pet) => pet.id));
 
       setApproachesBoundary(true);
       setLeavesSafeZone(true);
-      setCenter(DEFAULT_CENTER);
+      const currentSafeZone = safeZones.find(
+        (zone) =>
+          Number.isFinite(zone.center?.lat) &&
+          Number.isFinite(zone.center?.lng),
+      );
+      const hasPetFix =
+        selectedPet?.hasFix === true &&
+        Number.isFinite(selectedPet.lat) &&
+        Number.isFinite(selectedPet.lng);
+      setCenter(
+        hasPetFix
+          ? { lat: selectedPet.lat, lng: selectedPet.lng }
+          : currentSafeZone?.center || DEFAULT_CENTER,
+      );
+      setCenterConfigured(hasPetFix);
+      setPolygonPoints([]);
     }
-    setNameError('');
-  }, [editZone, pets]);
+    setNameError("");
+    // Pet telemetry snapshots replace the pets array frequently. Do not reset
+    // the in-progress zone draft when that happens; initialize only on zone change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editZone?.id]);
 
   // Toggle Pet Selection
-  const handleTogglePet = (petName) => {
+  const handleTogglePet = (petId) => {
     setSelectedPets((prev) =>
-      prev.includes(petName)
-        ? prev.filter((name) => name !== petName)
-        : [...prev, petName]
+      prev.includes(petId)
+        ? prev.filter((id) => id !== petId)
+        : [...prev, petId],
     );
   };
 
@@ -98,7 +136,11 @@ export default function AddSafeZoneScreen({
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!zoneName.trim()) {
-      setNameError('Zone name is required');
+      setNameError("Zone name is required");
+      return;
+    }
+    if (!centerConfigured) {
+      setNameError("Click the map to set the safe-zone center before saving.");
       return;
     }
 
@@ -107,22 +149,22 @@ export default function AddSafeZoneScreen({
       id: editZone?.id || `zone-${Date.now()}`,
       name: zoneName.trim(),
       shape: zoneType,
-      type: editZone?.type || 'Safe Zone',
+      type: editZone?.type || "Safe Zone",
       center: { ...center },
       radius,
       radiusMeters,
-      polygonPoints: zoneType === 'Polygon' ? polygonPoints : null,
+      polygonPoints: zoneType === "Polygon" ? polygonPoints : null,
       warningDistance: boundaryWarning,
       assignedPets: selectedPets,
       alertBehavior: {
         approachesBoundary,
         leavesSafeZone,
       },
-      badgeColor: editZone?.badgeColor || '#005A36',
-      borderColor: editZone?.borderColor || '#005A36',
-      bgColor: editZone?.bgColor || 'rgba(0, 90, 54, 0.14)',
-      borderStyle: 'dashed',
-      status: editZone?.status || 'Active',
+      badgeColor: editZone?.badgeColor || "#005A36",
+      borderColor: editZone?.borderColor || "#005A36",
+      bgColor: editZone?.bgColor || "rgba(0, 90, 54, 0.14)",
+      borderStyle: "dashed",
+      status: editZone?.status || "Active",
     };
 
     onSave(updatedZone);
@@ -134,12 +176,12 @@ export default function AddSafeZoneScreen({
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-gray-900">
-            {isEditing ? 'Edit Safe Zone' : 'Add Safe Zone'}
+            {isEditing ? "Edit Safe Zone" : "Add Safe Zone"}
           </h1>
           <p className="text-xs sm:text-sm text-gray-500 mt-0.5">
             {isEditing
-              ? `Update the safe roaming perimeter and safety rules for ${editZone?.name || 'this zone'}.`
-              : 'Draw an area where your pet can safely roam.'}
+              ? `Update the safe roaming perimeter and safety rules for ${editZone?.name || "this zone"}.`
+              : "Draw an area where your pet can safely roam."}
           </p>
         </div>
 
@@ -168,7 +210,10 @@ export default function AddSafeZoneScreen({
                 center,
                 radius: radiusMeters,
                 zoneName,
-                onCenterChange: setCenter,
+                onCenterChange: (nextCenter) => {
+                  setCenter(nextCenter);
+                  setCenterConfigured(true);
+                },
                 polygonPoints,
                 onPolygonPointsChange: setPolygonPoints,
                 editingZoneId: editZone?.id,
@@ -184,12 +229,12 @@ export default function AddSafeZoneScreen({
             {/* Card Header */}
             <div>
               <h2 className="text-xl font-bold tracking-tight text-gray-900">
-                {isEditing ? 'Edit Safe Zone' : 'Create Safe Zone'}
+                {isEditing ? "Edit Safe Zone" : "Create Safe Zone"}
               </h2>
               <p className="text-xs text-gray-500 mt-1">
                 {isEditing
-                  ? 'Update zone configuration and assigned pets.'
-                  : 'Define an area where your pet can safely roam.'}
+                  ? "Update zone configuration and assigned pets."
+                  : "Define an area where your pet can safely roam."}
               </p>
             </div>
 
@@ -204,13 +249,13 @@ export default function AddSafeZoneScreen({
                   value={zoneName}
                   onChange={(e) => {
                     setZoneName(e.target.value);
-                    if (nameError) setNameError('');
+                    if (nameError) setNameError("");
                   }}
                   placeholder="e.g. Home"
                   className={`w-full rounded-xl border bg-white px-3.5 py-2 text-sm text-gray-900 focus:outline-none focus:ring-1 ${
                     nameError
-                      ? 'border-rose-300 focus:border-rose-500 focus:ring-rose-500'
-                      : 'border-gray-200 focus:border-[#006C3B] focus:ring-[#006C3B]'
+                      ? "border-rose-300 focus:border-rose-500 focus:ring-rose-500"
+                      : "border-gray-200 focus:border-[#006C3B] focus:ring-[#006C3B]"
                   }`}
                 />
                 {nameError && (
@@ -228,11 +273,11 @@ export default function AddSafeZoneScreen({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setZoneType('Circle')}
+                    onClick={() => setZoneType("Circle")}
                     className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
-                      zoneType === 'Circle'
-                        ? 'bg-[#005A36] text-white shadow-2xs'
-                        : 'border border-[#005A36] text-gray-700 bg-white hover:bg-gray-50'
+                      zoneType === "Circle"
+                        ? "bg-[#005A36] text-white shadow-2xs"
+                        : "border border-[#005A36] text-gray-700 bg-white hover:bg-gray-50"
                     }`}
                   >
                     Circle
@@ -240,11 +285,11 @@ export default function AddSafeZoneScreen({
 
                   <button
                     type="button"
-                    onClick={() => setZoneType('Polygon')}
+                    onClick={() => setZoneType("Polygon")}
                     className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
-                      zoneType === 'Polygon'
-                        ? 'bg-[#005A36] text-white shadow-2xs'
-                        : 'border border-[#005A36] text-gray-700 bg-white hover:bg-gray-50'
+                      zoneType === "Polygon"
+                        ? "bg-[#005A36] text-white shadow-2xs"
+                        : "border border-[#005A36] text-gray-700 bg-white hover:bg-gray-50"
                     }`}
                   >
                     Polygon
@@ -253,7 +298,7 @@ export default function AddSafeZoneScreen({
               </div>
 
               {/* Field 3: Radius (Shown when Circle is selected) */}
-              {zoneType === 'Circle' && (
+              {zoneType === "Circle" && (
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1.5">
                     Radius
@@ -307,22 +352,24 @@ export default function AddSafeZoneScreen({
                 <div className="space-y-2">
                   {pets.length > 0 ? (
                     pets.map((p) => {
-                      const isChecked = selectedPets.includes(p.name);
+                      const isChecked = selectedPets.includes(p.id);
                       return (
                         <button
                           key={p.id}
                           type="button"
-                          onClick={() => handleTogglePet(p.name)}
+                          onClick={() => handleTogglePet(p.id)}
                           className="flex items-center gap-2.5 text-xs text-gray-800 cursor-pointer select-none group w-full text-left"
                         >
                           <div
                             className={`flex h-4 w-4 items-center justify-center rounded transition-colors ${
                               isChecked
-                                ? 'bg-[#005A36] text-white'
-                                : 'border border-gray-300 bg-white group-hover:border-gray-400'
+                                ? "bg-[#005A36] text-white"
+                                : "border border-gray-300 bg-white group-hover:border-gray-400"
                             }`}
                           >
-                            {isChecked && <Check className="h-3 w-3 stroke-[3]" />}
+                            {isChecked && (
+                              <Check className="h-3 w-3 stroke-[3]" />
+                            )}
                           </div>
                           <span className="font-medium">{p.name}</span>
                         </button>
@@ -330,7 +377,8 @@ export default function AddSafeZoneScreen({
                     })
                   ) : (
                     <p className="text-xs text-gray-400 italic">
-                      No pets registered yet. All future pets will be assigned by default.
+                      No pets registered yet. All future pets will be assigned
+                      by default.
                     </p>
                   )}
                 </div>
@@ -350,8 +398,8 @@ export default function AddSafeZoneScreen({
                     <div
                       className={`flex h-4 w-4 items-center justify-center rounded transition-colors ${
                         approachesBoundary
-                          ? 'bg-[#005A36] text-white'
-                          : 'border border-gray-300 bg-white group-hover:border-gray-400'
+                          ? "bg-[#005A36] text-white"
+                          : "border border-gray-300 bg-white group-hover:border-gray-400"
                       }`}
                     >
                       {approachesBoundary && (
@@ -369,11 +417,13 @@ export default function AddSafeZoneScreen({
                     <div
                       className={`flex h-4 w-4 items-center justify-center rounded transition-colors ${
                         leavesSafeZone
-                          ? 'bg-[#005A36] text-white'
-                          : 'border border-gray-300 bg-white group-hover:border-gray-400'
+                          ? "bg-[#005A36] text-white"
+                          : "border border-gray-300 bg-white group-hover:border-gray-400"
                       }`}
                     >
-                      {leavesSafeZone && <Check className="h-3 w-3 stroke-[3]" />}
+                      {leavesSafeZone && (
+                        <Check className="h-3 w-3 stroke-[3]" />
+                      )}
                     </div>
                     <span className="font-medium">Leaves safe zone</span>
                   </button>
@@ -386,7 +436,7 @@ export default function AddSafeZoneScreen({
                   type="submit"
                   className="w-full rounded-2xl bg-[#006C3B] py-3 text-sm font-semibold text-white shadow-sm hover:bg-[#03542C] active:scale-[0.99] transition-all cursor-pointer focus:outline-none"
                 >
-                  {isEditing ? 'Save Changes' : 'Save Safe Zone'}
+                  {isEditing ? "Save Changes" : "Save Safe Zone"}
                 </button>
               </div>
             </form>
